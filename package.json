@@ -1,0 +1,13 @@
+{
+  "name": "chiirl-supa-hookup",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "npx nodemon index.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "@supabase/supabase-js": "^2.45.0",
+    "dotenv": "^16.4.0"
+  }
+}
