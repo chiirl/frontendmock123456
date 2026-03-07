@@ -23,10 +23,12 @@ app.get('/', async (req, res) => {
   if (error) return res.status(500).send('Error loading events');
 
   const now = new Date();
+  const todayChicago = new Date(now.toLocaleString('en-US', { timeZone: 'America/Chicago' }));
+  todayChicago.setHours(0, 0, 0, 0);
   const upcoming = events.filter(e => {
     if (!e.start_datetime) return false;
-    const eventDate = new Date(e.start_datetime.replace(' CST', ' GMT-0600').replace(' CDT', ' GMT-0500'));
-    return eventDate >= now;
+    const eventDate = new Date(e.start_datetime.replace(/ [A-Z]{3,4}$/, ''));
+    return eventDate >= todayChicago;
   });
 
   function formatDate(raw) {
@@ -70,6 +72,7 @@ app.get('/', async (req, res) => {
 </head>
 <body>
   <h1>CHIIRL | Chicago In Real Life</h1>
+  <p><a href="/raw">raw table</a></p>
   <ul>
     ${deduped.map(e => `
       <li>
@@ -83,6 +86,45 @@ app.get('/', async (req, res) => {
       </li>
     `).join('')}
   </ul>
+</body>
+</html>`;
+
+  res.send(html);
+});
+
+app.get('/raw', async (req, res) => {
+  const { data: events, error } = await supabase
+    .from('CTC Current Events')
+    .select('*')
+    .order('start_datetime', { ascending: true });
+
+  if (error) return res.status(500).send('Error loading events');
+
+  const cols = Object.keys(events[0] || {});
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CHIIRL | Raw Data</title>
+  <style>
+    body { font-family: arial, helvetica, sans-serif; font-size: 12px; background: #f0f0e8; color: #222; margin: 0; padding: 10px; }
+    a { color: #00c; }
+    h1 { font-size: 18px; background: #800080; color: #fff; padding: 4px 8px; margin-bottom: 8px; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #999; padding: 3px 6px; text-align: left; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    th { background: #ddd; position: sticky; top: 0; }
+    tr:nth-child(even) { background: #e8e8e0; }
+  </style>
+</head>
+<body>
+  <h1>CHIIRL | Raw Data</h1>
+  <p><a href="/">back</a></p>
+  <table>
+    <tr>${cols.map(c => `<th>${c}</th>`).join('')}</tr>
+    ${events.map(e => `<tr>${cols.map(c => `<td>${e[c] != null ? e[c] : ''}</td>`).join('')}</tr>`).join('')}
+  </table>
 </body>
 </html>`;
 
