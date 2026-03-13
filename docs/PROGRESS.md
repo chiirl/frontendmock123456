@@ -103,3 +103,31 @@ Both produced valid event rows with `title`, `start_datetime`, `tags`, `eventUrl
 - Remaining unresolved: `2` (both known dead links):
   - `https://luma.com/mcpchicago` (404)
   - `https://www.meetup.com/chicago-tech-mixer-and-social-tech-ai-data/events/312412669` (dead)
+
+## Frontend + Ops Updates (March 13, 2026)
+
+### Documentation + licensing
+- Added root `README.md` with:
+  - project purpose
+  - environment setup
+  - ingestion commands (discovery + strict URL + Meetup auth)
+  - API/server usage
+- Added root `LICENSE` as MIT.
+
+### New frontend views on `/`
+- Added `Email Draft` tab button (next to Real/Inaccurate):
+  - renders copy-ready plain text style in-page (`<pre>`)
+  - event titles are clickable links to source `eventUrl`
+  - includes `copy` action
+- Added `Calendar` tab button:
+  - monthly grid view with prev/next month navigation
+  - each day lists event links with short time labels
+  - calendar view is now hard-pinned to `beta_chiirl_events` (`real` source), even if `source=inaccurate` is present.
+
+### Export route
+- Added `GET /email.txt` (plus `?source=...`) to return plain-text email draft output.
+- Email draft now includes all upcoming events from the selected source (not only current week), grouped by day.
+
+### Data cleanup
+- Found and removed duplicate `Founder’s Therapy - Coffee Roundtable` row in `beta_chiirl_events`.
+- Kept canonical Meetup URL row and preserved fuller location details.

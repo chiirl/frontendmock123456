@@ -364,8 +364,9 @@ app.get('/api/events', async (req, res) => {
 });
 
 app.get('/', async (req, res) => {
-  const source = getSource(req);
+  const requestedSource = getSource(req);
   const view = getView(req);
+  const source = view === 'calendar' ? 'real' : requestedSource;
   const monthParam = String(req.query.month || '');
   const tableName = getTableName(source);
   const { data: events, error } = await supabase
