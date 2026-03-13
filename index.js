@@ -20,7 +20,9 @@ function getSource(req) {
 }
 
 function getView(req) {
-  return req.query.view === 'email' ? 'email' : 'events';
+  if (req.query.view === 'email') return 'email';
+  if (req.query.view === 'calendar') return 'calendar';
+  return 'events';
 }
 
 function getTableName(source) {
@@ -123,6 +125,87 @@ function escapeHtml(s) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+function parseMonthParam(monthParam) {
+  const m = String(monthParam || '').match(/^(\d{4})-(\d{2})$/);
+  if (!m) return null;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  if (!year || month < 1 || month > 12) return null;
+  return { year, month };
+}
+
+function formatMonthParam(year, month) {
+  return `${year}-${String(month).padStart(2, '0')}`;
+}
+
+function shiftMonthParam(monthParam, delta) {
+  const parsed = parseMonthParam(monthParam);
+  if (!parsed) return '';
+  const d = new Date(Date.UTC(parsed.year, parsed.month - 1 + delta, 1, 12, 0, 0));
+  return formatMonthParam(d.getUTCFullYear(), d.getUTCMonth() + 1);
+}
+
+function buildCalendarModel(events, monthParam, referenceDate = new Date()) {
+  const ref = chicagoDateParts(referenceDate);
+  const parsed = parseMonthParam(monthParam);
+  const year = parsed?.year || ref.year;
+  const month = parsed?.month || ref.month;
+  const monthParamResolved = formatMonthParam(year, month);
+
+  const first = new Date(Date.UTC(year, month - 1, 1, 12, 0, 0));
+  const nextMonthFirst = new Date(Date.UTC(year, month, 1, 12, 0, 0));
+  const firstWeekday = first.getUTCDay(); // Sun=0
+  const gridStart = new Date(first);
+  gridStart.setUTCDate(gridStart.getUTCDate() - firstWeekday);
+
+  const eventMap = new Map();
+  for (const e of events) {
+    const dt = parseEventDate(e.start_datetime);
+    if (!dt) continue;
+    const key = chicagoDateKey(dt);
+    if (!eventMap.has(key)) eventMap.set(key, []);
+    eventMap.get(key).push(e);
+  }
+
+  const monthLabel = new Intl.DateTimeFormat('en-US', {
+    timeZone: CHICAGO_TIMEZONE,
+    month: 'long',
+    year: 'numeric'
+  }).format(first);
+
+  const weeks = [];
+  for (let w = 0; w < 6; w += 1) {
+    const row = [];
+    for (let d = 0; d < 7; d += 1) {
+      const cell = new Date(gridStart);
+      cell.setUTCDate(gridStart.getUTCDate() + (w * 7) + d);
+      const p = chicagoDateParts(cell);
+      const key = chicagoDateKey(cell);
+      const inMonth = p.year === year && p.month === month;
+      row.push({
+        key,
+        day: p.day,
+        inMonth,
+        isToday: key === chicagoDateKey(referenceDate),
+        events: (eventMap.get(key) || []).sort((a, b) => {
+          const ta = parseEventDate(a.start_datetime)?.getTime() || 0;
+          const tb = parseEventDate(b.start_datetime)?.getTime() || 0;
+          return ta - tb;
+        })
+      });
+    }
+    weeks.push(row);
+  }
+
+  return {
+    monthLabel,
+    monthParam: monthParamResolved,
+    prevMonthParam: shiftMonthParam(monthParamResolved, -1),
+    nextMonthParam: shiftMonthParam(monthParamResolved, 1),
+    weeks
+  };
 }
 
 function formatEmailLocation(event) {
@@ -283,6 +366,7 @@ app.get('/api/events', async (req, res) => {
 app.get('/', async (req, res) => {
   const source = getSource(req);
   const view = getView(req);
+  const monthParam = String(req.query.month || '');
   const tableName = getTableName(source);
   const { data: events, error } = await supabase
     .from(tableName)
@@ -326,6 +410,7 @@ app.get('/', async (req, res) => {
   const tags = [...new Set(deduped.flatMap(getEventTags))].sort();
   const emailDraft = buildEmailDraft(allDeduped);
   const emailDraftHtml = buildEmailDraftHtml(allDeduped);
+  const calendar = buildCalendarModel(allDeduped, monthParam);
 
   const html = `<!DOCTYPE html>
 <html lang="en">
@@ -357,14 +442,29 @@ app.get('/', async (req, res) => {
     pre.email-draft { max-width: 900px; white-space: pre-wrap; background: #fff; border: 1px solid #bbb; padding: 10px; font-family: "Courier New", monospace; line-height: 1.4; }
     .subtools { margin-bottom: 10px; max-width: 900px; font-size: 12px; }
     .copy-btn { font-size: 12px; padding: 2px 8px; }
+    .calendar-wrap { max-width: 1000px; }
+    .calendar-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    .calendar-head .month { font-weight: bold; min-width: 180px; }
+    .calendar-head a { text-decoration: none; border: 1px solid #999; background: #e8e8e0; color: #222; padding: 2px 8px; font-size: 12px; }
+    table.calendar { width: 100%; border-collapse: collapse; table-layout: fixed; background: #fff; }
+    table.calendar th, table.calendar td { border: 1px solid #bbb; vertical-align: top; padding: 6px; }
+    table.calendar th { background: #ddd; font-size: 12px; }
+    table.calendar td { height: 120px; font-size: 12px; }
+    .day-num { font-weight: bold; margin-bottom: 4px; }
+    .day-muted { color: #999; background: #fafafa; }
+    .day-today { outline: 2px solid #800080; outline-offset: -2px; }
+    .cal-event { margin: 2px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .cal-event a { text-decoration: underline; }
+    .cal-time { color: #666; margin-right: 4px; }
   </style>
 </head>
 <body>
   <h1>CHIIRL | Chicago In Real Life</h1>
   <div class="tabs">
-    <a href="${buildUrl('/', 'real', { tag: tagFilter, mode: modeFilter, view })}"${source === 'real' ? ' class="active"' : ''}>Real Data</a>
-    <a href="${buildUrl('/', 'inaccurate', { tag: tagFilter, mode: modeFilter, view })}"${source === 'inaccurate' ? ' class="active"' : ''}>Inaccurate Data</a>
+    <a href="${buildUrl('/', 'real', { tag: tagFilter, mode: modeFilter, view, month: view === 'calendar' ? calendar.monthParam : '' })}"${source === 'real' ? ' class="active"' : ''}>Real Data</a>
+    <a href="${buildUrl('/', 'inaccurate', { tag: tagFilter, mode: modeFilter, view, month: view === 'calendar' ? calendar.monthParam : '' })}"${source === 'inaccurate' ? ' class="active"' : ''}>Inaccurate Data</a>
     <a href="${buildUrl('/', source, { view: 'email' })}"${view === 'email' ? ' class="active"' : ''}>Email Draft</a>
+    <a href="${buildUrl('/', source, { view: 'calendar', month: calendar.monthParam })}"${view === 'calendar' ? ' class="active"' : ''}>Calendar</a>
   </div>
   <p><a href="${buildUrl('/archive', source)}">archive</a> | <a href="${buildUrl('/raw', source)}">raw table</a></p>
   ${view === 'events' ? `<div class="filters">
@@ -373,7 +473,7 @@ app.get('/', async (req, res) => {
     <a href="${buildUrl('/', source, { mode: 'online', tag: tagFilter })}"${modeFilter === 'online' ? ' class="active"' : ''}>Online</a>
     |
     ${tags.map(t => `<a href="${buildUrl('/', source, { tag: t, mode: modeFilter })}"${tagFilter === t ? ' class="active"' : ''}>${t}</a>`).join('')}
-  </div>` : `<div class="subtools"><a href="${buildUrl('/email.txt', source)}">plain text route</a> <button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('email-draft').innerText)">copy</button></div>`}
+  </div>` : view === 'email' ? `<div class="subtools"><a href="${buildUrl('/email.txt', source)}">plain text route</a> <button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('email-draft').innerText)">copy</button></div>` : ''}
   ${view === 'events' ? `<ul>
     ${filtered.map(e => `
       <li>
@@ -387,7 +487,38 @@ app.get('/', async (req, res) => {
         </div>
       </li>
     `).join('')}
-  </ul>` : `<pre id="email-draft" class="email-draft">${emailDraftHtml}</pre>`}
+  </ul>` : view === 'email' ? `<pre id="email-draft" class="email-draft">${emailDraftHtml}</pre>` : `
+  <div class="calendar-wrap">
+    <div class="calendar-head">
+      <a href="${buildUrl('/', source, { view: 'calendar', month: calendar.prevMonthParam })}">&larr; Prev</a>
+      <span class="month">${escapeHtml(calendar.monthLabel)}</span>
+      <a href="${buildUrl('/', source, { view: 'calendar', month: calendar.nextMonthParam })}">Next &rarr;</a>
+    </div>
+    <table class="calendar">
+      <thead>
+        <tr>
+          <th>Sun</th><th>Mon</th><th>Tue</th><th>Wed</th><th>Thu</th><th>Fri</th><th>Sat</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${calendar.weeks.map((week) => `
+          <tr>
+            ${week.map((cell) => `
+              <td class="${cell.inMonth ? '' : 'day-muted'} ${cell.isToday ? 'day-today' : ''}">
+                <div class="day-num">${cell.day}</div>
+                ${cell.events.map((e) => `
+                  <div class="cal-event">
+                    <span class="cal-time">${escapeHtml(formatChiirlTimeShort(e.start_datetime))}</span>
+                    <a href="${escapeHtml(e.eventUrl || '#')}" target="_blank" rel="noopener noreferrer">${escapeHtml(e.title || '')}</a>
+                  </div>
+                `).join('')}
+              </td>
+            `).join('')}
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  </div>`}
 </body>
 </html>`;
 
