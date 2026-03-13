@@ -3,7 +3,7 @@ create table if not exists public.beta_chiirl_events (
   title text,
   start_datetime text,
   "Online" text,
-  tech_category text,
+  tags text[],
   image_url text,
   "eventUrl" text,
   location text,

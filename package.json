@@ -3,11 +3,15 @@
   "version": "1.0.0",
   "scripts": {
     "start": "node index.js",
-    "dev": "npx nodemon index.js"
+    "dev": "npx nodemon index.js",
+    "meetup:login": "node scripts/meetup-login-headed.js"
   },
   "dependencies": {
-    "express": "^4.21.0",
     "@supabase/supabase-js": "^2.45.0",
-    "dotenv": "^16.4.0"
+    "dotenv": "^16.4.0",
+    "express": "^4.21.0"
+  },
+  "devDependencies": {
+    "playwright": "^1.58.2"
   }
 }

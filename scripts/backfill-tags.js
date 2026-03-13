@@ -19,10 +19,13 @@ async function run() {
     throw new Error('Missing tags column. Run sql/add_tags_column.sql in Supabase SQL Editor first.');
   }
 
-  const { data, error } = await supabase
-    .from(table)
-    .select('id,tech_category,tags')
-    .order('id', { ascending: true });
+  const { error: techColErr } = await supabase.from(table).select('tech_category').limit(1);
+  if (techColErr) {
+    console.log('No tech_category column found. Nothing to backfill.');
+    return;
+  }
+
+  const { data, error } = await supabase.from(table).select('id,tech_category,tags').order('id', { ascending: true });
   if (error) throw new Error(error.message);
 
   const updates = data
