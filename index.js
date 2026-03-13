@@ -19,6 +19,10 @@ function getSource(req) {
   return req.query.source === 'inaccurate' ? 'inaccurate' : 'real';
 }
 
+function getView(req) {
+  return req.query.view === 'email' ? 'email' : 'events';
+}
+
 function getTableName(source) {
   return source === 'inaccurate' ? INACCURATE_TABLE_NAME : REAL_TABLE_NAME;
 }
@@ -78,6 +82,160 @@ function chicagoDateKey(d) {
   }).format(d);
 }
 
+function chicagoDateParts(d) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: CHICAGO_TIMEZONE,
+    weekday: 'long',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(d);
+  const pick = (type) => parts.find((p) => p.type === type)?.value || '';
+  return {
+    weekday: pick('weekday'),
+    year: Number(pick('year')),
+    month: Number(pick('month')),
+    day: Number(pick('day'))
+  };
+}
+
+function formatChiirlTimeShort(raw) {
+  const d = parseEventDate(raw);
+  if (!d) return '';
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: CHICAGO_TIMEZONE,
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true
+  }).formatToParts(d);
+  const pick = (type) => parts.find((p) => p.type === type)?.value || '';
+  const hour = pick('hour');
+  const minute = pick('minute');
+  const ap = (pick('dayPeriod') || '').toLowerCase().startsWith('p') ? 'p' : 'a';
+  if (!hour) return '';
+  return minute === '00' ? `${hour}${ap}` : `${hour}${minute}${ap}`;
+}
+
+function escapeHtml(s) {
+  return String(s || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function formatEmailLocation(event) {
+  if (!event) return '';
+  if (event.Online === 'TRUE') return 'Online';
+  const raw = String(event.location || '').trim();
+  if (!raw) return '';
+  const parts = raw
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean);
+  if (parts.length <= 2) return parts.join(', ');
+  return `${parts[0]}, ${parts[parts.length - 1]}`;
+}
+
+function formatNextWeekVenue(event) {
+  if (!event) return '';
+  if (event.Online === 'TRUE') return 'Online';
+  const raw = String(event.location || '').trim();
+  if (!raw) return '';
+  return raw.split(',').map((x) => x.trim()).filter(Boolean)[0] || '';
+}
+
+function buildEmailDraftModel(events, referenceDate = new Date()) {
+  const todayKey = chicagoDateKey(referenceDate);
+  const sorted = [...events]
+    .filter((e) => {
+      const dt = parseEventDate(e.start_datetime);
+      if (!dt) return false;
+      return chicagoDateKey(dt) >= todayKey;
+    })
+    .sort((a, b) => {
+    const ta = parseEventDate(a.start_datetime)?.getTime() || 0;
+    const tb = parseEventDate(b.start_datetime)?.getTime() || 0;
+    return ta - tb;
+  });
+
+  const byDay = new Map();
+  for (const e of sorted) {
+    const dt = parseEventDate(e.start_datetime);
+    if (!dt) continue;
+    const key = chicagoDateKey(dt);
+    if (!byDay.has(key)) {
+      const p = chicagoDateParts(dt);
+      byDay.set(key, {
+        label: `${String(p.month).padStart(2, '0')}.${String(p.day).padStart(2, '0')} ${p.weekday}`,
+        events: []
+      });
+    }
+    byDay.get(key).events.push(e);
+  }
+
+  return [...byDay.values()].map((day) => ({
+    label: day.label,
+    events: day.events.map((e) => ({
+      time: formatChiirlTimeShort(e.start_datetime),
+      title: e.title || '',
+      location: formatEmailLocation(e),
+      eventUrl: e.eventUrl || '#'
+    }))
+  }));
+}
+
+function buildEmailDraft(events, referenceDate = new Date()) {
+  const days = buildEmailDraftModel(events, referenceDate);
+  const lines = [
+    'Hey CHI IRL,',
+    '',
+    'Hope you have a good week!',
+    ''
+  ];
+
+  for (const day of days) {
+    lines.push(day.label);
+    lines.push('');
+    for (const e of day.events) {
+      lines.push(`    ${e.time}: ${e.title}${e.location ? `, ${e.location}` : ''}`);
+    }
+    lines.push('');
+  }
+
+  if (days.length === 0) {
+    lines.push('No upcoming events found.');
+  }
+
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd();
+}
+
+function buildEmailDraftHtml(events, referenceDate = new Date()) {
+  const days = buildEmailDraftModel(events, referenceDate);
+  const lines = [
+    'Hey CHI IRL,',
+    '',
+    'Hope you have a good week!',
+    ''
+  ];
+
+  for (const day of days) {
+    lines.push(escapeHtml(day.label));
+    lines.push('');
+    for (const e of day.events) {
+      const href = escapeHtml(e.eventUrl || '#');
+      const title = escapeHtml(e.title || '');
+      const location = e.location ? `, ${escapeHtml(e.location)}` : '';
+      lines.push(`    ${escapeHtml(e.time)}: <a href="${href}" target="_blank" rel="noopener noreferrer">${title}</a>${location}`);
+    }
+    lines.push('');
+  }
+
+  if (days.length === 0) lines.push('No upcoming events found.');
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd();
+}
+
 function formatChicagoDateTime(raw, includeYearIfPast = false) {
   const d = parseEventDate(raw);
   if (!d) return '';
@@ -124,6 +282,7 @@ app.get('/api/events', async (req, res) => {
 
 app.get('/', async (req, res) => {
   const source = getSource(req);
+  const view = getView(req);
   const tableName = getTableName(source);
   const { data: events, error } = await supabase
     .from(tableName)
@@ -133,6 +292,10 @@ app.get('/', async (req, res) => {
   if (error) return res.status(500).send('Error loading events');
 
   const todayKey = chicagoDateKey(new Date());
+  const allDeduped = events.filter((e) => !!parseEventDate(e.start_datetime)).filter((e, idx, arr) => {
+    const key = `${e.title}|${e.start_datetime}`;
+    return arr.findIndex((x) => `${x.title}|${x.start_datetime}` === key) === idx;
+  });
   const upcoming = events.filter(e => {
     if (!e.start_datetime) return false;
     const eventDate = parseEventDate(e.start_datetime);
@@ -161,6 +324,8 @@ app.get('/', async (req, res) => {
   });
 
   const tags = [...new Set(deduped.flatMap(getEventTags))].sort();
+  const emailDraft = buildEmailDraft(allDeduped);
+  const emailDraftHtml = buildEmailDraftHtml(allDeduped);
 
   const html = `<!DOCTYPE html>
 <html lang="en">
@@ -189,23 +354,27 @@ app.get('/', async (req, res) => {
     .filters a.active { background: #800080; color: #fff; border-color: #800080; }
     .filters a:visited { color: #222; }
     .filters a.active:visited { color: #fff; }
+    pre.email-draft { max-width: 900px; white-space: pre-wrap; background: #fff; border: 1px solid #bbb; padding: 10px; font-family: "Courier New", monospace; line-height: 1.4; }
+    .subtools { margin-bottom: 10px; max-width: 900px; font-size: 12px; }
+    .copy-btn { font-size: 12px; padding: 2px 8px; }
   </style>
 </head>
 <body>
   <h1>CHIIRL | Chicago In Real Life</h1>
   <div class="tabs">
-    <a href="${buildUrl('/', 'real', { tag: tagFilter, mode: modeFilter })}"${source === 'real' ? ' class="active"' : ''}>Real Data</a>
-    <a href="${buildUrl('/', 'inaccurate', { tag: tagFilter, mode: modeFilter })}"${source === 'inaccurate' ? ' class="active"' : ''}>Inaccurate Data</a>
+    <a href="${buildUrl('/', 'real', { tag: tagFilter, mode: modeFilter, view })}"${source === 'real' ? ' class="active"' : ''}>Real Data</a>
+    <a href="${buildUrl('/', 'inaccurate', { tag: tagFilter, mode: modeFilter, view })}"${source === 'inaccurate' ? ' class="active"' : ''}>Inaccurate Data</a>
+    <a href="${buildUrl('/', source, { view: 'email' })}"${view === 'email' ? ' class="active"' : ''}>Email Draft</a>
   </div>
   <p><a href="${buildUrl('/archive', source)}">archive</a> | <a href="${buildUrl('/raw', source)}">raw table</a></p>
-  <div class="filters">
+  ${view === 'events' ? `<div class="filters">
     <a href="${buildUrl('/', source)}"${!tagFilter && !modeFilter ? ' class="active"' : ''}>All</a>
     <a href="${buildUrl('/', source, { mode: 'irl', tag: tagFilter })}"${modeFilter === 'irl' ? ' class="active"' : ''}>IRL</a>
     <a href="${buildUrl('/', source, { mode: 'online', tag: tagFilter })}"${modeFilter === 'online' ? ' class="active"' : ''}>Online</a>
     |
     ${tags.map(t => `<a href="${buildUrl('/', source, { tag: t, mode: modeFilter })}"${tagFilter === t ? ' class="active"' : ''}>${t}</a>`).join('')}
-  </div>
-  <ul>
+  </div>` : `<div class="subtools"><a href="${buildUrl('/email.txt', source)}">plain text route</a> <button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('email-draft').innerText)">copy</button></div>`}
+  ${view === 'events' ? `<ul>
     ${filtered.map(e => `
       <li>
         ${e.image_url ? `<img src="${e.image_url}" alt="">` : ''}
@@ -218,11 +387,31 @@ app.get('/', async (req, res) => {
         </div>
       </li>
     `).join('')}
-  </ul>
+  </ul>` : `<pre id="email-draft" class="email-draft">${emailDraftHtml}</pre>`}
 </body>
 </html>`;
 
   res.send(html);
+});
+
+app.get('/email.txt', async (req, res) => {
+  const source = getSource(req);
+  const tableName = getTableName(source);
+  const { data: events, error } = await supabase
+    .from(tableName)
+    .select('*')
+    .order('start_datetime', { ascending: true });
+
+  if (error) return res.status(500).send('Error loading events');
+
+  const allDeduped = (events || [])
+    .filter((e) => !!parseEventDate(e.start_datetime))
+    .filter((e, idx, arr) => {
+      const key = `${e.title}|${e.start_datetime}`;
+      return arr.findIndex((x) => `${x.title}|${x.start_datetime}` === key) === idx;
+    });
+
+  res.type('text/plain').send(buildEmailDraft(allDeduped));
 });
 
 app.get('/event', async (req, res) => {
