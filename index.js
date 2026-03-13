@@ -32,6 +32,31 @@ function buildUrl(path, source, params = {}) {
   return qs ? `${path}?${qs}` : path;
 }
 
+function getEventTags(event) {
+  if (!event) return [];
+
+  const clean = (x) => String(x || '').trim();
+  const uniq = (arr) => [...new Set(arr.map(clean).filter(Boolean))];
+
+  if (Array.isArray(event.tags)) return uniq(event.tags);
+
+  if (typeof event.tags === 'string' && event.tags.trim()) {
+    try {
+      const parsed = JSON.parse(event.tags);
+      if (Array.isArray(parsed)) return uniq(parsed);
+    } catch {
+      // fall through to delimiter parsing
+    }
+    return uniq(event.tags.split(/[|,]/));
+  }
+
+  if (typeof event.tech_category === 'string' && event.tech_category.trim()) {
+    return uniq(event.tech_category.split('|'));
+  }
+
+  return [];
+}
+
 function parseEventDate(raw) {
   if (!raw) return null;
   const asDate = new Date(raw);
@@ -123,16 +148,19 @@ app.get('/', async (req, res) => {
     return true;
   });
 
-  const categoryFilter = req.query.category || '';
+  const tagFilter = req.query.tag || req.query.category || '';
   const modeFilter = req.query.mode || '';
   const filtered = deduped.filter(e => {
-    if (categoryFilter && e.tech_category !== categoryFilter) return false;
+    if (tagFilter) {
+      const tags = getEventTags(e);
+      if (!tags.includes(tagFilter)) return false;
+    }
     if (modeFilter === 'online' && e.Online !== 'TRUE') return false;
     if (modeFilter === 'irl' && e.Online === 'TRUE') return false;
     return true;
   });
 
-  const categories = [...new Set(deduped.map(e => e.tech_category).filter(Boolean))].sort();
+  const tags = [...new Set(deduped.flatMap(getEventTags))].sort();
 
   const html = `<!DOCTYPE html>
 <html lang="en">
@@ -166,16 +194,16 @@ app.get('/', async (req, res) => {
 <body>
   <h1>CHIIRL | Chicago In Real Life</h1>
   <div class="tabs">
-    <a href="${buildUrl('/', 'real', { category: categoryFilter, mode: modeFilter })}"${source === 'real' ? ' class="active"' : ''}>Real Data</a>
-    <a href="${buildUrl('/', 'inaccurate', { category: categoryFilter, mode: modeFilter })}"${source === 'inaccurate' ? ' class="active"' : ''}>Inaccurate Data</a>
+    <a href="${buildUrl('/', 'real', { tag: tagFilter, mode: modeFilter })}"${source === 'real' ? ' class="active"' : ''}>Real Data</a>
+    <a href="${buildUrl('/', 'inaccurate', { tag: tagFilter, mode: modeFilter })}"${source === 'inaccurate' ? ' class="active"' : ''}>Inaccurate Data</a>
   </div>
   <p><a href="${buildUrl('/archive', source)}">archive</a> | <a href="${buildUrl('/raw', source)}">raw table</a></p>
   <div class="filters">
-    <a href="${buildUrl('/', source)}"${!categoryFilter && !modeFilter ? ' class="active"' : ''}>All</a>
-    <a href="${buildUrl('/', source, { mode: 'irl' })}"${modeFilter === 'irl' ? ' class="active"' : ''}>IRL</a>
-    <a href="${buildUrl('/', source, { mode: 'online' })}"${modeFilter === 'online' ? ' class="active"' : ''}>Online</a>
+    <a href="${buildUrl('/', source)}"${!tagFilter && !modeFilter ? ' class="active"' : ''}>All</a>
+    <a href="${buildUrl('/', source, { mode: 'irl', tag: tagFilter })}"${modeFilter === 'irl' ? ' class="active"' : ''}>IRL</a>
+    <a href="${buildUrl('/', source, { mode: 'online', tag: tagFilter })}"${modeFilter === 'online' ? ' class="active"' : ''}>Online</a>
     |
-    ${categories.map(c => `<a href="${buildUrl('/', source, { category: c, mode: modeFilter })}"${categoryFilter === c ? ' class="active"' : ''}>${c}</a>`).join('')}
+    ${tags.map(t => `<a href="${buildUrl('/', source, { tag: t, mode: modeFilter })}"${tagFilter === t ? ' class="active"' : ''}>${t}</a>`).join('')}
   </div>
   <ul>
     ${filtered.map(e => `
