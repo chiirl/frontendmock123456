@@ -13,6 +13,7 @@ if (!process.env.SUPABASE_URL || !supabaseReadKey) {
 const supabase = createClient(process.env.SUPABASE_URL, supabaseReadKey);
 const REAL_TABLE_NAME = process.env.SUPABASE_TABLE || 'beta_chiirl_events';
 const INACCURATE_TABLE_NAME = process.env.SUPABASE_INACCURATE_TABLE || 'CTC Current Events';
+const CHICAGO_TIMEZONE = 'America/Chicago';
 
 function getSource(req) {
   return req.query.source === 'inaccurate' ? 'inaccurate' : 'real';
@@ -29,6 +30,60 @@ function buildUrl(path, source, params = {}) {
   });
   const qs = query.toString();
   return qs ? `${path}?${qs}` : path;
+}
+
+function parseEventDate(raw) {
+  if (!raw) return null;
+  const asDate = new Date(raw);
+  if (!Number.isNaN(asDate.getTime())) return asDate;
+
+  const withOffset = raw
+    .replace(' CST', ' GMT-0600')
+    .replace(' CDT', ' GMT-0500');
+  const fallback = new Date(withOffset);
+  return Number.isNaN(fallback.getTime()) ? null : fallback;
+}
+
+function chicagoDateKey(d) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: CHICAGO_TIMEZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).format(d);
+}
+
+function formatChicagoDateTime(raw, includeYearIfPast = false) {
+  const d = parseEventDate(raw);
+  if (!d) return '';
+
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: CHICAGO_TIMEZONE,
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true
+  }).formatToParts(d);
+
+  const val = (type) => parts.find((p) => p.type === type)?.value || '';
+  const weekday = val('weekday');
+  const month = val('month');
+  const day = val('day');
+  const year = val('year');
+  const hour = val('hour');
+  const minute = val('minute');
+  const period = (val('dayPeriod') || '').toLowerCase();
+
+  const nowYear = new Intl.DateTimeFormat('en-US', {
+    timeZone: CHICAGO_TIMEZONE,
+    year: 'numeric'
+  }).format(new Date());
+  const yearSuffix = includeYearIfPast && year && year < nowYear ? ` ${year}` : '';
+
+  return `${weekday}, ${month} ${day}${yearSuffix} ${hour}:${minute}${period}`;
 }
 
 app.get('/api/events', async (req, res) => {
@@ -52,26 +107,13 @@ app.get('/', async (req, res) => {
 
   if (error) return res.status(500).send('Error loading events');
 
-  const now = new Date();
-  const todayChicago = new Date(now.toLocaleString('en-US', { timeZone: 'America/Chicago' }));
-  todayChicago.setHours(0, 0, 0, 0);
+  const todayKey = chicagoDateKey(new Date());
   const upcoming = events.filter(e => {
     if (!e.start_datetime) return false;
-    const eventDate = new Date(e.start_datetime.replace(/ [A-Z]{3,4}$/, ''));
-    return eventDate >= todayChicago;
+    const eventDate = parseEventDate(e.start_datetime);
+    if (!eventDate) return false;
+    return chicagoDateKey(eventDate) >= todayKey;
   });
-
-  function formatDate(raw) {
-    if (!raw) return '';
-    const d = new Date(raw.replace(' CST', ' GMT-0600').replace(' CDT', ' GMT-0500'));
-    const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    let hours = d.getHours();
-    const ampm = hours >= 12 ? 'pm' : 'am';
-    hours = hours % 12 || 12;
-    const mins = d.getMinutes().toString().padStart(2, '0');
-    return `${days[d.getDay()]}, ${months[d.getMonth()]} ${d.getDate()} ${hours}:${mins}${ampm}`;
-  }
 
   const seen = new Set();
   const deduped = upcoming.filter(e => {
@@ -141,7 +183,7 @@ app.get('/', async (req, res) => {
         ${e.image_url ? `<img src="${e.image_url}" alt="">` : ''}
         <div><a href="${e.eventUrl || '#'}">${e.title}</a>
         <span class="tag">(${e.Online === 'TRUE' ? 'Online' : 'IRL'})</span><br>
-        <span class="date">${formatDate(e.start_datetime)}</span>
+        <span class="date">${formatChicagoDateTime(e.start_datetime)}</span>
         <span class="loc">${e.location || ''}</span>
         ${e.google_maps_url && e.Online !== 'TRUE' ? ` - <a href="${e.google_maps_url}">map</a>` : ''}
         - <a href="${buildUrl('/event', source, { title: e.title, date: e.start_datetime || '' })}">raw</a>
@@ -218,20 +260,6 @@ app.get('/archive', async (req, res) => {
 
   if (error) return res.status(500).send('Error loading events');
 
-  const currentYear = new Date().getFullYear();
-  function formatDate(raw) {
-    if (!raw) return '';
-    const d = new Date(raw.replace(' CST', ' GMT-0600').replace(' CDT', ' GMT-0500'));
-    const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    let hours = d.getHours();
-    const ampm = hours >= 12 ? 'pm' : 'am';
-    hours = hours % 12 || 12;
-    const mins = d.getMinutes().toString().padStart(2, '0');
-    const year = d.getFullYear() < currentYear ? ` ${d.getFullYear()}` : '';
-    return `${days[d.getDay()]}, ${months[d.getMonth()]} ${d.getDate()}${year} ${hours}:${mins}${ampm}`;
-  }
-
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -269,7 +297,7 @@ app.get('/archive', async (req, res) => {
         ${e.image_url ? `<img src="${e.image_url}" alt="">` : ''}
         <div><a href="${e.eventUrl || '#'}">${e.title}</a>
         <span class="tag">(${e.Online === 'TRUE' ? 'Online' : 'IRL'})</span><br>
-        <span class="date">${formatDate(e.start_datetime)}</span>
+        <span class="date">${formatChicagoDateTime(e.start_datetime, true)}</span>
         <span class="loc">${e.location || ''}</span>
         - <a href="${buildUrl('/event', source, { title: e.title, date: e.start_datetime || '' })}">raw</a>
         </div>
