@@ -2,4 +2,5 @@ node_modules
 .env
 WORKORDER-SOCIAL.md
 WORKORDER-SUBMISSIONS.md
+CHIIRL-2.0-WORKORDER.md
 .auth

@@ -43,7 +43,9 @@ function parseArgs(argv) {
     max: 200,
     seedScan: 180,
     seedPages: 60,
+    concurrency: 8,
     dryRun: false,
+    weekly: false,
     urls: [],
     strictUrls: false,
     meetupAuth: false,
@@ -72,8 +74,17 @@ function parseArgs(argv) {
       i += 1;
       continue;
     }
+    if (arg === '--concurrency') {
+      opts.concurrency = Number(argv[i + 1] || opts.concurrency);
+      i += 1;
+      continue;
+    }
     if (arg === '--dry-run') {
       opts.dryRun = true;
+      continue;
+    }
+    if (arg === '--weekly') {
+      opts.weekly = true;
       continue;
     }
     if (arg === '--meetup-auth') {
@@ -137,10 +148,34 @@ function canonicalizeUrl(input) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Per-host throttle: serializes requests to the same host with a delay
+// between them so concurrent workers don't burst the same domain.
+// ---------------------------------------------------------------------------
+const HOST_DELAY_MS = 800;
+const _hostQueues = new Map();
+
+async function hostThrottle(host) {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const prev = _hostQueues.get(host) || Promise.resolve();
+  const ticket = prev.then(() => sleep(HOST_DELAY_MS));
+  _hostQueues.set(host, ticket);
+  await ticket;
+}
+
 async function fetchText(url) {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const maxAttempts = 4;
   let lastStatus = 'network';
+
+  // Serialize per-host: only one in-flight request per domain at a time,
+  // with HOST_DELAY_MS between consecutive requests.
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    await hostThrottle(host);
+  } catch {
+    // Not a valid URL — will fail below anyway.
+  }
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const controller = new AbortController();
@@ -161,12 +196,31 @@ async function fetchText(url) {
     if (res.ok) return res.text();
 
     if (status === 429 || (status >= 500 && status < 600)) {
-      await sleep(500 * attempt * attempt);
+      await sleep(2000 * attempt * attempt);
       continue;
     }
     break;
   }
   throw new Error(`Fetch failed ${lastStatus} for ${url}`);
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency limiter — runs up to `limit` async tasks at once.
+// ---------------------------------------------------------------------------
+async function parallelMap(items, fn, limit = 8) {
+  const results = [];
+  let idx = 0;
+
+  async function worker() {
+    while (idx < items.length) {
+      const i = idx++;
+      results[i] = await fn(items[i], i);
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(limit, items.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
 }
 
 function parseMhubStartDate(raw) {
@@ -245,7 +299,8 @@ function parseMhubEvent(html, sourceUrl, includeTagsColumn) {
 
 function isLumaUrl(url) {
   try {
-    return new URL(url).hostname.toLowerCase().includes('luma.com');
+    const h = new URL(url).hostname.toLowerCase();
+    return h.includes('luma.com') || h.includes('lu.ma');
   } catch {
     return false;
   }
@@ -275,61 +330,69 @@ function isEventbriteUrl(url) {
   }
 }
 
-async function fetchEventRows(urls, includeTagsColumn, strictUrlsMode = false) {
+// ---------------------------------------------------------------------------
+// Process a single URL — returns { row } or { skip }.
+// ---------------------------------------------------------------------------
+async function fetchSingleEventRow(url, includeTagsColumn, strictUrlsMode) {
+  const html = await fetchText(url);
+  if (isMhubUrl(url)) {
+    const row = parseMhubEvent(html, url, includeTagsColumn);
+    if (!row) return { skip: { url, reason: 'missing mHUB title/date' } };
+    return { row };
+  }
+
+  if (!isLumaUrl(url) && !isMeetupUrl(url) && !isEventbriteUrl(url)) {
+    return { skip: { url, reason: 'unsupported host (only luma + meetup + mhub + eventbrite)' } };
+  }
+
+  const event = extractEventJsonLd(html);
+  const ogImage = extractMetaContent(html, 'property', 'og:image');
+  if (!event) {
+    if (isMeetupUrl(url) && globalMeetupFallback?.enabled) {
+      const row = await fetchMeetupEventViaBrowser(url, includeTagsColumn);
+      if (row) return { row };
+    }
+    return { skip: { url, reason: 'missing event JSON-LD' } };
+  }
+
+  if (!strictUrlsMode) {
+    const cls = classifyEvent(event.name, event.description);
+    if (!cls.relevant) {
+      const reason = cls.ambiguous
+        ? `ambiguous include=${cls.includeHits.join('|')} exclude=${cls.excludeHits.join('|')}`
+        : 'not in target founder/startup/tech/ai scope';
+      return { skip: { url, reason } };
+    }
+    if (!isChicagoAreaEvent(event)) {
+      return { skip: { url, reason: 'not in Chicago area' } };
+    }
+  }
+
+  return { row: mapToRow(event, url, ogImage, includeTagsColumn) };
+}
+
+// ---------------------------------------------------------------------------
+// Fetch event rows with concurrency control.
+// ---------------------------------------------------------------------------
+async function fetchEventRows(urls, includeTagsColumn, strictUrlsMode = false, concurrency = 8) {
   const rows = [];
   const skipped = [];
 
-  for (const url of urls) {
-    try {
-      const html = await fetchText(url);
-      if (isMhubUrl(url)) {
-        const row = parseMhubEvent(html, url, includeTagsColumn);
-        if (!row) {
-          skipped.push({ url, reason: 'missing mHUB title/date' });
-          continue;
-        }
-        rows.push(row);
-        continue;
+  const results = await parallelMap(
+    urls,
+    async (url) => {
+      try {
+        return await fetchSingleEventRow(url, includeTagsColumn, strictUrlsMode);
+      } catch (err) {
+        return { skip: { url, reason: err.message } };
       }
+    },
+    concurrency
+  );
 
-      if (!isLumaUrl(url) && !isMeetupUrl(url) && !isEventbriteUrl(url)) {
-        skipped.push({ url, reason: 'unsupported host (only luma + meetup + mhub + eventbrite)' });
-        continue;
-      }
-
-      const event = extractEventJsonLd(html);
-      const ogImage = extractMetaContent(html, 'property', 'og:image');
-      if (!event) {
-        if (isMeetupUrl(url) && globalMeetupFallback?.enabled) {
-          const row = await fetchMeetupEventViaBrowser(url, includeTagsColumn);
-          if (row) {
-            rows.push(row);
-            continue;
-          }
-        }
-        skipped.push({ url, reason: 'missing event JSON-LD' });
-        continue;
-      }
-
-      if (!strictUrlsMode) {
-        const cls = classifyEvent(event.name, event.description);
-        if (!cls.relevant) {
-          const reason = cls.ambiguous
-            ? `ambiguous include=${cls.includeHits.join('|')} exclude=${cls.excludeHits.join('|')}`
-            : 'not in target founder/startup/tech/ai scope';
-          skipped.push({ url, reason });
-          continue;
-        }
-        if (!isChicagoAreaEvent(event)) {
-          skipped.push({ url, reason: 'not in Chicago area' });
-          continue;
-        }
-      }
-
-      rows.push(mapToRow(event, url, ogImage, includeTagsColumn));
-    } catch (err) {
-      skipped.push({ url, reason: err.message });
-    }
+  for (const result of results) {
+    if (result.row) rows.push(result.row);
+    if (result.skip) skipped.push(result.skip);
   }
 
   return { rows, skipped };
@@ -384,7 +447,7 @@ async function fetchMeetupEventViaBrowser(url, includeTagsColumn) {
 
     const eventUrl = canonicalizeUrl(event.eventUrl || url);
     const location = event.venue
-      ? [event.venue.name, event.venue.address, event.venue.city, event.venue.state].filter(Boolean).join(', ')
+      ? cleanLocationString([event.venue.name, event.venue.address, event.venue.city, event.venue.state].filter(Boolean).join(', '))
       : null;
     const description = event.description || '';
     const title = event.title || null;
@@ -528,23 +591,58 @@ function isChicagoAreaEvent(event) {
   return false;
 }
 
+function cleanLocationString(loc) {
+  if (!loc) return loc;
+  let parts = loc.split(',').map((p) => p.trim()).filter(Boolean);
+  // Remove consecutive duplicate parts.
+  parts = parts.filter((p, i) => i === 0 || p !== parts[i - 1]);
+  // Strip embedded zip codes.
+  parts = parts.map((p) => p.replace(/\s+\d{5}(-\d{4})?\b/, '').trim());
+  // Remove standalone zip parts.
+  parts = parts.filter((p) => !/^\d{5}(-\d{4})?$/.test(p));
+  // Remove trailing US/USA.
+  if (parts.length > 1 && /^(us|usa)$/i.test(parts[parts.length - 1])) parts.pop();
+  if (parts.length > 0) {
+    parts[parts.length - 1] = parts[parts.length - 1].replace(/,?\s*(US|USA)$/i, '').trim();
+  }
+  // Re-dedupe after zip strip (case-insensitive).
+  parts = parts.filter((p, i) => i === 0 || p.toLowerCase() !== parts[i - 1].toLowerCase());
+  // Remove trailing duplicate city+state pairs.
+  if (parts.length >= 4) {
+    const last2 = parts.slice(-2).map((p) => p.toLowerCase()).join('|');
+    const prev2 = parts.slice(-4, -2).map((p) => p.toLowerCase()).join('|');
+    if (last2 === prev2) parts = parts.slice(0, -2);
+  }
+  // Handle doubled content within a single part.
+  parts = parts.map((p) => {
+    const words = p.split(/\s+/);
+    for (let len = 3; len <= Math.floor(words.length / 2); len++) {
+      const suffix = words.slice(-len).join(' ');
+      const prefix = words.slice(-(len * 2), -len).join(' ');
+      if (suffix === prefix) return words.slice(0, words.length - len).join(' ');
+    }
+    return p;
+  });
+  return parts.filter(Boolean).join(', ');
+}
+
 function normalizeLocation(location) {
   if (!location) return null;
+  let raw;
   if (typeof location.address === 'string') {
     const parts = [location.name, location.address].filter(Boolean);
-    return parts.join(', ');
+    raw = parts.join(', ');
+  } else {
+    const address = location.address || {};
+    const parts = [
+      location.name,
+      address.streetAddress,
+      address.addressLocality,
+      address.addressRegion
+    ].filter(Boolean);
+    raw = parts.length > 0 ? parts.join(', ') : (location.name || null);
   }
-
-  const address = location.address || {};
-  const parts = [
-    location.name,
-    address.streetAddress,
-    address.addressLocality,
-    address.addressRegion
-  ].filter(Boolean);
-
-  if (parts.length > 0) return parts.join(', ');
-  return location.name || null;
+  return cleanLocationString(raw);
 }
 
 function inferTechCategory(title, description) {
@@ -600,7 +698,7 @@ function mapToRow(event, fallbackUrl, fallbackImage, includeTagsColumn) {
     start_datetime: event.startDate || null,
     Online: online,
     tags: normalizedTags,
-    image_url: Array.isArray(event.image) ? event.image[0] : fallbackImage,
+    image_url: Array.isArray(event.image) ? event.image[0] : event.image || fallbackImage,
     eventUrl: event['@id'] || fallbackUrl,
     location: normalizeLocation(event.location),
     google_maps_url: null
@@ -610,6 +708,228 @@ function mapToRow(event, fallbackUrl, fallbackImage, includeTagsColumn) {
   }
 
   return row;
+}
+
+// ---------------------------------------------------------------------------
+// Extract event URLs from an HTML listing page (Luma, Eventbrite, Meetup).
+// Scans for <a href="..."> links that look like individual event pages.
+// ---------------------------------------------------------------------------
+function extractEventUrlsFromListing(html) {
+  const urls = new Set();
+  const linkRe = /<a[^>]+href=["']([^"']+)["'][^>]*>/gi;
+  let m;
+  while ((m = linkRe.exec(html)) !== null) {
+    const href = m[1];
+    try {
+      const resolved = href.startsWith('http') ? href : `https://luma.com${href}`;
+      const u = new URL(resolved);
+      const host = u.hostname.toLowerCase();
+      const path = u.pathname;
+
+      // Luma event pages: /slug-id (single path segment, not a known non-event route)
+      if (host.includes('luma.com')) {
+        const parts = path.split('/').filter(Boolean);
+        if (parts.length === 1 && !/^(chicago|new-york|sf|explore|pricing|about|blog|login|signup|search)$/i.test(parts[0])) {
+          urls.add(`https://luma.com/${parts[0]}`);
+        }
+      }
+
+      // Meetup event pages: /<group>/events/<id>
+      if (host.includes('meetup.com')) {
+        const parts = path.split('/').filter(Boolean);
+        const evIdx = parts.findIndex((p) => p.toLowerCase() === 'events');
+        if (evIdx >= 1 && parts[evIdx + 1]) {
+          urls.add(`https://www.meetup.com/${parts[evIdx - 1]}/events/${parts[evIdx + 1]}`);
+        }
+      }
+
+      // Eventbrite event pages: /e/<slug-id>
+      if (host.includes('eventbrite.com') && /^\/e\//.test(path)) {
+        urls.add(`https://www.eventbrite.com${path.replace(/\/+$/, '')}`);
+      }
+
+      // mHUB event pages
+      if (host.includes('mhubchicago.com') && /\/event/i.test(path)) {
+        urls.add(`https://www.mhubchicago.com${path.replace(/\/+$/, '')}`);
+      }
+    } catch {
+      // Not a valid URL, skip.
+    }
+  }
+  return [...urls];
+}
+
+// ---------------------------------------------------------------------------
+// Extract Luma calendar / organizer page URLs from a listing page.
+// These are pages like lu.ma/calendar/cal-XXXX or lu.ma/@organizer.
+// ---------------------------------------------------------------------------
+function extractCalendarUrlsFromListing(html) {
+  const urls = new Set();
+  const linkRe = /<a[^>]+href=["']([^"']+)["'][^>]*>/gi;
+  let m;
+  while ((m = linkRe.exec(html)) !== null) {
+    const href = m[1];
+    try {
+      const resolved = href.startsWith('http') ? href : `https://luma.com${href}`;
+      const u = new URL(resolved);
+      const host = u.hostname.toLowerCase();
+      const path = u.pathname;
+
+      if (host.includes('luma.com') || host.includes('lu.ma')) {
+        // Calendar pages: /calendar/cal-XXXX
+        if (/^\/calendar\/cal-/i.test(path)) {
+          urls.add(`https://luma.com${path}`);
+        }
+        // Organizer pages: /@handle
+        if (/^\/@[^/]+$/.test(path)) {
+          urls.add(`https://luma.com${path}`);
+        }
+      }
+    } catch {
+      // skip
+    }
+  }
+  return [...urls];
+}
+
+// ---------------------------------------------------------------------------
+// Extract organizer/community seed pages from an individual event's HTML.
+// Looks for links to organizer profiles and related pages.
+// ---------------------------------------------------------------------------
+function extractSeedPagesFromHtml(html) {
+  const pages = new Set();
+  const linkRe = /<a[^>]+href=["']([^"']+)["'][^>]*>/gi;
+  let m;
+  while ((m = linkRe.exec(html)) !== null) {
+    const href = m[1];
+    try {
+      const resolved = href.startsWith('http') ? href : new URL(href, 'https://luma.com').href;
+      const u = new URL(resolved);
+      const host = u.hostname.toLowerCase();
+      const path = u.pathname;
+
+      // Luma organizer/calendar pages
+      if (host.includes('luma.com') || host.includes('lu.ma')) {
+        if (/^\/calendar\/cal-/i.test(path) || /^\/@[^/]+$/.test(path)) {
+          pages.add(`https://luma.com${path}`);
+        }
+      }
+
+      // Meetup group pages (not individual events)
+      if (host.includes('meetup.com')) {
+        const parts = path.split('/').filter(Boolean);
+        if (parts.length === 1 && !/^(find|topics|cities|apps|help|about)$/i.test(parts[0])) {
+          pages.add(`https://www.meetup.com/${parts[0]}`);
+        }
+        if (parts.length >= 2 && parts[1].toLowerCase() === 'events' && !parts[2]) {
+          pages.add(`https://www.meetup.com/${parts[0]}/events`);
+        }
+      }
+
+      // Eventbrite organizer pages
+      if (host.includes('eventbrite.com') && /^\/o\//i.test(path)) {
+        pages.add(`https://www.eventbrite.com${path.replace(/\/+$/, '')}`);
+      }
+    } catch {
+      // skip
+    }
+  }
+  return [...pages];
+}
+
+// ---------------------------------------------------------------------------
+// Extract organizer/group URLs from DB history event URLs.
+// Derives the org listing page from each event URL pattern.
+// ---------------------------------------------------------------------------
+function extractOrgUrlsFromEventUrls(eventUrls) {
+  const orgUrls = new Set();
+
+  for (const url of eventUrls) {
+    try {
+      const u = new URL(url);
+      const host = u.hostname.toLowerCase();
+      const path = u.pathname;
+
+      // Meetup: /group-name/events/12345 → /group-name/events (upcoming list)
+      if (host.includes('meetup.com')) {
+        const parts = path.split('/').filter(Boolean);
+        const evIdx = parts.findIndex((p) => p.toLowerCase() === 'events');
+        if (evIdx >= 1) {
+          orgUrls.add(`https://www.meetup.com/${parts[evIdx - 1]}/events`);
+        }
+      }
+
+      // Eventbrite: /e/event-slug → can't derive org, but we can try /o/ links found in HTML later
+
+      // Luma: single-segment paths are events; we can't derive the calendar from the event ID alone
+      // but extractSeedPagesFromHtml will find calendar links when we fetch the event page
+
+    } catch {
+      // skip
+    }
+  }
+
+  return [...orgUrls];
+}
+
+// ---------------------------------------------------------------------------
+// Known venue overrides for ambiguous addresses.
+// ---------------------------------------------------------------------------
+const VENUE_OVERRIDES = {
+  '100 S State St': 'CIC Chicago Innovation Center, 100 S State St, Chicago, IL'
+};
+
+// ---------------------------------------------------------------------------
+// Let's Do Fun Things — scrape their listing page for tech-relevant events.
+// They rarely have tech events, but when they do we want to catch them.
+// ---------------------------------------------------------------------------
+async function fetchLdftEvents(includeTagsColumn) {
+  const rows = [];
+  try {
+    const html = await fetchText('https://www.letsdofunthings.org/events');
+    // Their Next.js RSC payload embeds event JSON with escaped quotes.
+    // Unescape and extract event objects.
+    const unescaped = html.replace(/\\"/g, '"');
+    const eventRe = /"slug":"([^"]+)","name":"([^"]+)","image_url":"([^"]*)","start_at":"([^"]+)","venue_name":"([^"]*)","address":"([^"]*)","short_description":"([^"]*)"/g;
+    let m;
+    while ((m = eventRe.exec(unescaped)) !== null) {
+      const [, slug, name, imageUrl, startAt, venueName, address, description] = m;
+      const cls = classifyEvent(name, description);
+      if (!cls.relevant) continue;
+
+      const eventUrl = `https://www.letsdofunthings.org/events/${slug}`;
+      let location = cleanLocationString(
+        venueName && venueName !== address.split(',')[0]
+          ? `${venueName}, ${address}`
+          : address
+      );
+      // Apply venue overrides for ambiguous addresses.
+      for (const [pattern, override] of Object.entries(VENUE_OVERRIDES)) {
+        if (location.includes(pattern)) {
+          location = override;
+          break;
+        }
+      }
+
+      const tags = inferEventTags(name, description);
+      const primary = inferTechCategory(name, description);
+      const normalizedTags = [primary, ...tags.filter((t) => t !== primary)].slice(0, 12);
+
+      rows.push({
+        title: name.trim(),
+        start_datetime: startAt,
+        Online: 'FALSE',
+        tags: normalizedTags,
+        image_url: imageUrl || null,
+        eventUrl,
+        location,
+        google_maps_url: null
+      });
+    }
+  } catch (err) {
+    console.log(`Let's Do Fun Things scrape failed: ${err.message}`);
+  }
+  return rows;
 }
 
 async function loadCandidateUrls(opts) {
@@ -623,6 +943,7 @@ async function loadCandidateUrls(opts) {
   const calendarUrls = extractCalendarUrlsFromListing(html).slice(0, 20);
   const allUrls = new Set(directEventUrls);
 
+  // Fetch calendar pages sequentially (all luma.com — avoid rate limits).
   for (const calendarUrl of calendarUrls) {
     try {
       const calendarHtml = await fetchText(calendarUrl);
@@ -636,8 +957,13 @@ async function loadCandidateUrls(opts) {
   return [...allUrls].slice(0, opts.max);
 }
 
-async function loadSeedUrlsFromDb(supabase, scanLimit) {
+// ---------------------------------------------------------------------------
+// Load seed event URLs from DB. When weeklyMode is true, only load future
+// events as seeds (cheaper), but use the full history for org extraction.
+// ---------------------------------------------------------------------------
+async function loadSeedUrlsFromDb(supabase, scanLimit, weeklyMode = false) {
   const out = new Set();
+  const allHistoryUrls = [];
   const tables = [
     process.env.SUPABASE_TABLE || 'beta_chiirl_events',
     process.env.SUPABASE_INACCURATE_TABLE || 'CTC Current Events'
@@ -647,13 +973,24 @@ async function loadSeedUrlsFromDb(supabase, scanLimit) {
   for (const table of tables) {
     const { data, error } = await supabase
       .from(table)
-      .select('eventUrl,title')
-      .limit(2000);
+      .select('eventUrl,title,start_datetime')
+      .limit(5000);
     if (error) continue;
 
+    const now = new Date().toISOString();
     for (const row of data || []) {
       const normalized = canonicalizeEventUrl(String(row.eventUrl || '').trim());
       if (!normalized) continue;
+
+      // Always collect for org extraction.
+      allHistoryUrls.push(normalized);
+
+      // In weekly mode, only use future/recent events as direct seeds.
+      if (weeklyMode) {
+        const dt = row.start_datetime || '';
+        if (dt && dt < now) continue;
+      }
+
       out.add(normalized);
 
       const marker = `${row.title || ''} ${row.eventUrl || ''}`.toLowerCase();
@@ -664,26 +1001,33 @@ async function loadSeedUrlsFromDb(supabase, scanLimit) {
   }
 
   const prioritized = [...new Set([...ctcW3WBoost, ...out])];
-  return prioritized.slice(0, scanLimit);
+  return {
+    seedUrls: prioritized.slice(0, scanLimit),
+    allHistoryUrls
+  };
 }
 
-async function expandCandidatesFromSeeds(baseUrls, seedPageUrls, max) {
+async function expandCandidatesFromSeeds(baseUrls, seedPageUrls, max, concurrency = 6) {
   const all = new Set(baseUrls.map(canonicalizeEventUrl).filter(Boolean));
   const queue = [...seedPageUrls];
 
-  for (const url of queue) {
-    try {
-      const html = await fetchText(url);
-      const eventUrls = extractEventUrlsFromListing(html);
-      for (const eventUrl of eventUrls) {
-        const canonical = canonicalizeEventUrl(eventUrl);
-        if (canonical) all.add(canonical);
+  await parallelMap(
+    queue,
+    async (url) => {
+      if (all.size >= max) return;
+      try {
+        const html = await fetchText(url);
+        const eventUrls = extractEventUrlsFromListing(html);
+        for (const eventUrl of eventUrls) {
+          const canonical = canonicalizeEventUrl(eventUrl);
+          if (canonical) all.add(canonical);
+        }
+      } catch {
+        // Ignore failed seed pages.
       }
-      if (all.size >= max) break;
-    } catch {
-      // Ignore failed seed pages.
-    }
-  }
+    },
+    concurrency
+  );
 
   return [...all].slice(0, max);
 }
@@ -716,6 +1060,71 @@ async function hasTagsColumn(supabase, table) {
   return !error;
 }
 
+// ---------------------------------------------------------------------------
+// Upsert rows — insert new events, update changed fields for existing ones.
+// ---------------------------------------------------------------------------
+async function upsertEventRows(supabase, table, rows) {
+  const stats = { inserted: 0, updated: 0, unchanged: 0 };
+  const eventUrls = rows.map((r) => r.eventUrl);
+  const existingMap = new Map();
+
+  // Fetch existing rows with full data for comparison.
+  for (const part of chunk(eventUrls, 100)) {
+    const { data, error } = await supabase
+      .from(table)
+      .select('id,title,start_datetime,Online,tags,image_url,eventUrl,location')
+      .in('eventUrl', part);
+    if (error) throw new Error(`Upsert lookup failed: ${error.message}`);
+    for (const row of data || []) {
+      if (row.eventUrl) existingMap.set(row.eventUrl, row);
+    }
+  }
+
+  const toInsert = [];
+  const toUpdate = [];
+
+  for (const row of rows) {
+    const existing = existingMap.get(row.eventUrl);
+    if (!existing) {
+      toInsert.push(row);
+      continue;
+    }
+
+    // Check if any field has changed.
+    const changed =
+      existing.title !== row.title ||
+      existing.start_datetime !== row.start_datetime ||
+      existing.Online !== row.Online ||
+      existing.location !== row.location ||
+      existing.image_url !== row.image_url ||
+      JSON.stringify(existing.tags) !== JSON.stringify(row.tags);
+
+    if (changed) {
+      toUpdate.push({ id: existing.id, ...row });
+    } else {
+      stats.unchanged++;
+    }
+  }
+
+  if (toInsert.length > 0) {
+    const { data, error } = await supabase.from(table).insert(toInsert).select('title,eventUrl');
+    if (error) throw new Error(`Insert failed: ${error.message}`);
+    stats.inserted = (data || []).length;
+  }
+
+  for (const row of toUpdate) {
+    const { id, ...fields } = row;
+    const { error } = await supabase.from(table).update(fields).eq('id', id);
+    if (error) {
+      console.log(`Update failed for id=${id}: ${error.message}`);
+    } else {
+      stats.updated++;
+    }
+  }
+
+  return stats;
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   const writeKey = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -740,36 +1149,73 @@ async function main() {
       let cityCandidateUrls = [];
       try {
         cityCandidateUrls = await loadCandidateUrls(opts);
+        console.log(`City listing found ${cityCandidateUrls.length} direct candidates.`);
       } catch (err) {
         console.log(`City listing unavailable (${err.message}); continuing with DB seeds.`);
       }
-      const dbSeedEventUrls = await loadSeedUrlsFromDb(supabase, opts.seedScan);
-      const seedPageUrls = new Set();
 
-      for (const eventUrl of dbSeedEventUrls) {
-        try {
-          const html = await fetchText(eventUrl);
-          const pages = extractSeedPagesFromHtml(html);
-          for (const p of pages) seedPageUrls.add(p);
-        } catch {
-          // Ignore individual failed event pages while mining seeds.
-        }
-        if (seedPageUrls.size >= opts.seedPages) break;
-      }
+      const { seedUrls: dbSeedEventUrls, allHistoryUrls } = await loadSeedUrlsFromDb(
+        supabase,
+        opts.seedScan,
+        opts.weekly
+      );
+      console.log(`DB seeds: ${dbSeedEventUrls.length} event URLs, ${allHistoryUrls.length} total history URLs.`);
+
+      // Derive org/group listing pages from ALL historical event URLs.
+      const orgUrls = extractOrgUrlsFromEventUrls(allHistoryUrls);
+      console.log(`Derived ${orgUrls.length} unique org/group listing URLs from DB history.`);
+
+      // Mine organizer/calendar pages from historical event pages.
+      // Luma event URLs don't reveal the org, so we must fetch them to find
+      // organizer links. For non-Luma we already derived orgs from the URL.
+      const seedPageUrls = new Set(orgUrls);
+      const lumaHistoryUrls = allHistoryUrls.filter((u) => isLumaUrl(u));
+      const nonLumaToMine = dbSeedEventUrls.filter((u) => !isLumaUrl(u)).slice(0, 40);
+      const eventsToMine = [...lumaHistoryUrls, ...nonLumaToMine];
+      console.log(`Mining ${lumaHistoryUrls.length} Luma + ${nonLumaToMine.length} other event pages for org links...`);
+      await parallelMap(
+        eventsToMine,
+        async (eventUrl) => {
+          try {
+            const html = await fetchText(eventUrl);
+            const pages = extractSeedPagesFromHtml(html);
+            for (const p of pages) seedPageUrls.add(p);
+          } catch {
+            // Ignore individual failed event pages while mining seeds.
+          }
+        },
+        opts.concurrency
+      );
+      console.log(`Total seed/org pages to expand: ${seedPageUrls.size}`);
 
       candidateUrls = await expandCandidatesFromSeeds(
         [...new Set([...cityCandidateUrls, ...dbSeedEventUrls])],
-        [...seedPageUrls].slice(0, opts.seedPages),
-        opts.max
+        [...seedPageUrls].slice(0, opts.seedPages + orgUrls.length),
+        opts.max,
+        opts.concurrency
       );
-      console.log(`Found ${candidateUrls.length} candidate URLs (city+db-seeds).`);
-      console.log(`Seed event pages scanned: ${dbSeedEventUrls.length}; seed community pages: ${seedPageUrls.size}`);
+      console.log(`Found ${candidateUrls.length} candidate URLs (city+db-seeds+orgs).`);
     }
 
     const includeTagsColumn = await hasTagsColumn(supabase, table);
     if (!includeTagsColumn) throw new Error('Missing `tags` column on target table.');
 
-    const { rows: hydratedRows, skipped } = await fetchEventRows(candidateUrls, includeTagsColumn, opts.strictUrls);
+    const { rows: hydratedRows, skipped } = await fetchEventRows(
+      candidateUrls,
+      includeTagsColumn,
+      opts.strictUrls,
+      opts.concurrency
+    );
+
+    // Scrape Let's Do Fun Things for tech-relevant events.
+    if (!opts.strictUrls) {
+      const ldftRows = await fetchLdftEvents(includeTagsColumn);
+      if (ldftRows.length > 0) {
+        console.log(`Let's Do Fun Things: found ${ldftRows.length} tech-relevant event(s).`);
+        hydratedRows.push(...ldftRows);
+      }
+    }
+
     console.log(`Relevant rows: ${hydratedRows.length}`);
     console.log(`Skipped rows: ${skipped.length}`);
     if (skipped.length > 0) {
@@ -784,38 +1230,50 @@ async function main() {
       return;
     }
 
-    if (opts.dryRun) {
-      console.log('Dry run payload:');
-      console.log(JSON.stringify(hydratedRows, null, 2));
-      return;
-    }
-
-    const normalizedRows = hydratedRows.filter((r) => r.title && r.start_datetime && r.eventUrl);
-    const existing = await findExistingEventUrls(
-      supabase,
-      table,
-      normalizedRows.map((r) => r.eventUrl)
-    );
-    const toInsert = normalizedRows.filter((r) => !existing.has(r.eventUrl));
-
-    if (toInsert.length === 0) {
-      console.log('No new rows to insert (all already exist).');
-      return;
-    }
-
-    const { data, error } = await supabase
-      .from(table)
-      .insert(toInsert)
-      .select('title,start_datetime,eventUrl,tags');
-
-    if (error) {
-      throw new Error(`Insert failed: ${error.message}`);
-    }
-
-    console.log(`Inserted ${data.length} new events into ${table}.`);
-    data.forEach((row) => {
-      console.log(`- ${row.start_datetime} | ${(row.tags || []).join(',')} | ${row.title} | ${row.eventUrl}`);
+    const now = new Date().toISOString();
+    const seen = new Set();
+    const normalizedRows = hydratedRows.filter((r) => {
+      if (!r.title || !r.start_datetime || !r.eventUrl) return false;
+      if (r.start_datetime < now) return false;
+      // Dedupe by title + date so the same event listed on multiple group
+      // pages (e.g. two Meetup groups for the same organizer) only appears once.
+      const key = `${r.title.toLowerCase().trim()}|${r.start_datetime.slice(0, 16)}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
     });
+
+    if (opts.dryRun) {
+      // In dry-run mode, still check against DB to show what WOULD be new.
+      const existing = await findExistingEventUrls(
+        supabase,
+        table,
+        normalizedRows.map((r) => r.eventUrl)
+      );
+      const newRows = normalizedRows.filter((r) => !existing.has(r.eventUrl));
+      const existingRows = normalizedRows.filter((r) => existing.has(r.eventUrl));
+
+      console.log(`\n--- DRY RUN RESULTS ---`);
+      console.log(`Total relevant events scraped: ${normalizedRows.length}`);
+      console.log(`Already in DB: ${existingRows.length}`);
+      console.log(`NEW events that would be added: ${newRows.length}`);
+
+      if (newRows.length > 0) {
+        console.log('\nNew events:');
+        newRows.forEach((row) => {
+          console.log(`  + ${row.start_datetime} | ${(row.tags || []).join(',')} | ${row.title}`);
+          console.log(`    ${row.eventUrl}`);
+        });
+      }
+
+      console.log('\nDry run payload (full):');
+      console.log(JSON.stringify(newRows, null, 2));
+      return;
+    }
+
+    // Use upsert to insert new and update changed events.
+    const stats = await upsertEventRows(supabase, table, normalizedRows);
+    console.log(`\nUpsert complete: ${stats.inserted} inserted, ${stats.updated} updated, ${stats.unchanged} unchanged.`);
   } finally {
     await closeMeetupFallback(globalMeetupFallback);
     globalMeetupFallback = null;

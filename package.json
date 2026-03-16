@@ -4,6 +4,9 @@
   "scripts": {
     "start": "node index.js",
     "dev": "npx nodemon index.js",
+    "dev:up": "/bin/bash -lc 'cd /home/ev/chiirl-supa-hookup && setsid -f npx nodemon index.js </dev/null >/tmp/chiirl-supa-hookup.log 2>&1 && sleep 2 && pgrep -af \"nodemon index.js|node index.js\" | tee /tmp/chiirl-supa-hookup.pid'",
+    "dev:down": "/bin/bash -lc 'if [ -f /tmp/chiirl-supa-hookup.pid ]; then awk \"{print \\$1}\" /tmp/chiirl-supa-hookup.pid | xargs -r kill; rm -f /tmp/chiirl-supa-hookup.pid; else pkill -f \"nodemon index.js|node index.js\" || true; fi'",
+    "dev:status": "/bin/bash -lc 'pgrep -af \"nodemon index.js|node index.js\" || true; echo \"---\"; tail -n 20 /tmp/chiirl-supa-hookup.log 2>/dev/null || true'",
     "meetup:login": "node scripts/meetup-login-headed.js"
   },
   "dependencies": {
