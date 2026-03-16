@@ -1,8 +1,19 @@
+const path = require('path');
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
+const {
+  clearSessionCookies,
+  createPublicClient,
+  ensureProfile,
+  getSessionContext,
+  setSessionCookies,
+  updateProfile
+} = require('./auth');
 
 const app = express();
+app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
 const supabaseReadKey =
   process.env.SUPABASE_PUBLISHABLE_KEY ||
   process.env.SUPABASE_ANON_KEY ||
@@ -11,13 +22,8 @@ if (!process.env.SUPABASE_URL || !supabaseReadKey) {
   throw new Error('Missing SUPABASE_URL or SUPABASE_PUBLISHABLE_KEY');
 }
 const supabase = createClient(process.env.SUPABASE_URL, supabaseReadKey);
-const REAL_TABLE_NAME = process.env.SUPABASE_TABLE || 'beta_chiirl_events';
-const INACCURATE_TABLE_NAME = process.env.SUPABASE_INACCURATE_TABLE || 'CTC Current Events';
+const EVENTS_TABLE_NAME = process.env.SUPABASE_TABLE || 'beta_chiirl_events';
 const CHICAGO_TIMEZONE = 'America/Chicago';
-
-function getSource(req) {
-  return req.query.source === 'inaccurate' ? 'inaccurate' : 'real';
-}
 
 function getView(req) {
   if (req.query.view === 'email') return 'email';
@@ -25,17 +31,57 @@ function getView(req) {
   return 'events';
 }
 
-function getTableName(source) {
-  return source === 'inaccurate' ? INACCURATE_TABLE_NAME : REAL_TABLE_NAME;
-}
-
-function buildUrl(path, source, params = {}) {
-  const query = new URLSearchParams({ source });
+function buildUrl(path, params = {}) {
+  const query = new URLSearchParams();
   Object.entries(params).forEach(([k, v]) => {
     if (v != null && v !== '') query.set(k, v);
   });
   const qs = query.toString();
   return qs ? `${path}?${qs}` : path;
+}
+
+function buildAppBaseUrl(req) {
+  if (process.env.APP_BASE_URL) return process.env.APP_BASE_URL.replace(/\/+$/, '');
+  const proto = req.get('x-forwarded-proto') || req.protocol || 'http';
+  return `${proto}://${req.get('host')}`;
+}
+
+function getSafeNextPath(value) {
+  const next = String(value || '').trim();
+  if (!next.startsWith('/')) return '/me';
+  if (next.startsWith('//')) return '/me';
+  return next;
+}
+
+function renderAuthLinks(auth) {
+  if (auth?.user) {
+    const label = escapeHtml(auth.profile?.display_name || auth.user.email || 'My Profile');
+    return `<p><a href="/me">${label}</a></p>`;
+  }
+  return '<p><a href="/auth">Sign in</a></p>';
+}
+
+function renderLogoStyles() {
+  return 'img.site-logo { display: block; width: min(100%, 540px); height: auto; margin: 0 0 12px; }';
+}
+
+function renderThemeStyles() {
+  return `
+    a { color: #1d6f93; }
+    a:visited { color: #1d6f93; }
+    h1 { font-size: 18px; background: #41b6e6; color: #fff; padding: 4px 8px; margin-bottom: 8px; }
+    button { padding: 8px 10px; background: #41b6e6; color: #fff; border: 1px solid #1d6f93; }
+    .tabs a { display: inline-block; padding: 4px 10px; margin-right: 4px; font-size: 12px; text-decoration: none; border: 1px solid #1d6f93; color: #fff; background: #41b6e6; }
+    .tabs a.active { background: #1d6f93; color: #fff; border-color: #1d6f93; }
+    .tabs a:visited { color: #fff; }
+    .tabs a.active:visited { color: #fff; }
+    .filters a { display: inline-block; padding: 2px 8px; margin: 2px; font-size: 12px; text-decoration: none; border: 1px solid #1d6f93; color: #fff; background: #41b6e6; }
+    .filters a.active { background: #1d6f93; color: #fff; border-color: #1d6f93; }
+    .filters a:visited { color: #fff; }
+    .filters a.active:visited { color: #fff; }
+    .calendar-head a { text-decoration: none; border: 1px solid #1d6f93; background: #41b6e6; color: #fff; padding: 2px 8px; font-size: 12px; }
+    .day-today { outline: 2px solid #41b6e6; outline-offset: -2px; }
+  `;
 }
 
 function getEventTags(event) {
@@ -352,25 +398,287 @@ function formatChicagoDateTime(raw, includeYearIfPast = false) {
   return `${weekday}, ${month} ${day}${yearSuffix} ${hour}:${minute}${period}`;
 }
 
+app.get('/logo.png', (req, res) => {
+  res.sendFile(path.join(__dirname, 'Logo_on_light_bg.png'));
+});
+
 app.get('/api/events', async (req, res) => {
-  const source = getSource(req);
-  const tableName = getTableName(source);
   const { data, error } = await supabase
-    .from(tableName)
+    .from(EVENTS_TABLE_NAME)
     .select('*');
 
   if (error) return res.status(500).json({ error: error.message });
   res.json(data);
 });
 
+app.get('/api/me', async (req, res) => {
+  try {
+    const auth = await getSessionContext(req, res);
+    if (!auth.user) return res.status(401).json({ error: 'Not signed in' });
+    const profile = auth.profile || await ensureProfile(auth.user);
+    return res.json({
+      user: {
+        id: auth.user.id,
+        email: auth.user.email
+      },
+      profile
+    });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/auth', async (req, res) => {
+  const auth = await getSessionContext(req, res);
+  if (auth.user) return res.redirect('/me');
+
+  const message = String(req.query.message || '');
+  const error = String(req.query.error || '');
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CHIIRL | Sign In</title>
+  <style>
+    ${renderLogoStyles()}
+    ${renderThemeStyles()}
+    body { font-family: arial, helvetica, sans-serif; font-size: 14px; background: #f0f0e8; color: #222; margin: 0; padding: 10px; }
+    form { max-width: 460px; background: #fff; border: 1px solid #bbb; padding: 12px; }
+    label { display: block; margin-bottom: 6px; font-weight: bold; }
+    input[type="email"] { width: 100%; box-sizing: border-box; padding: 8px; margin-bottom: 10px; }
+    .note { max-width: 460px; margin-bottom: 10px; }
+    .msg { max-width: 460px; padding: 8px 10px; border: 1px solid #bbb; margin-bottom: 10px; background: #fff; }
+    .err { border-color: #b33; background: #fff0f0; }
+  </style>
+</head>
+<body>
+  <img class="site-logo" src="/logo.png" alt="CHIIRL | Chicago In Real Life">
+  <h1>CHIIRL | Sign In</h1>
+  <p><a href="/">back to events</a></p>
+  ${message ? `<p class="msg">${escapeHtml(message)}</p>` : ''}
+  ${error ? `<p class="msg err">${escapeHtml(error)}</p>` : ''}
+  <p class="note">Enter your email and CHIIRL will send you a Supabase magic link. Your profile record is created the first time you finish sign-in.</p>
+  <form method="post" action="/auth/sign-in">
+    <label for="email">Email</label>
+    <input id="email" name="email" type="email" autocomplete="email" required>
+    <button type="submit">Send magic link</button>
+  </form>
+</body>
+</html>`;
+  res.send(html);
+});
+
+app.post('/auth/sign-in', async (req, res) => {
+  const email = String(req.body.email || '').trim().toLowerCase();
+  if (!email) {
+    return res.redirect('/auth?error=Email%20is%20required');
+  }
+
+  try {
+    const supabaseAuth = createPublicClient();
+    const redirectTo = `${buildAppBaseUrl(req)}/auth/callback?next=${encodeURIComponent('/me')}`;
+    const { error } = await supabaseAuth.auth.signInWithOtp({
+      email,
+      options: { emailRedirectTo: redirectTo }
+    });
+    if (error) {
+      return res.redirect(`/auth?error=${encodeURIComponent(error.message)}`);
+    }
+    return res.redirect(`/auth?message=${encodeURIComponent(`Magic link sent to ${email}`)}`);
+  } catch (error) {
+    return res.redirect(`/auth?error=${encodeURIComponent(error.message)}`);
+  }
+});
+
+app.get('/auth/callback', async (req, res) => {
+  const code = String(req.query.code || '');
+  const tokenHash = String(req.query.token_hash || '');
+  const type = String(req.query.type || 'email');
+  const next = getSafeNextPath(req.query.next);
+  if (!code && !tokenHash) {
+    return res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CHIIRL | Finishing Sign In</title>
+</head>
+<body>
+  <p>Finishing sign-in...</p>
+  <script>
+    (async function () {
+      var hash = new URLSearchParams(window.location.hash.slice(1));
+      var accessToken = hash.get('access_token');
+      var refreshToken = hash.get('refresh_token');
+      if (!accessToken || !refreshToken) {
+        document.body.innerHTML =
+          '<p>Auth callback is missing a server-readable token.</p>' +
+          '<p>Update the Supabase Magic Link email template to use <code>{{ .RedirectTo }}</code> and append <code>token_hash</code> plus <code>type=email</code>.</p>';
+        return;
+      }
+
+      var response = await fetch('/auth/callback/session?next=${encodeURIComponent(next)}', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({
+          access_token: accessToken,
+          refresh_token: refreshToken
+        })
+      });
+      var result = await response.json().catch(function () { return {}; });
+      if (!response.ok || !result.next) {
+        document.body.innerHTML =
+          '<p>Unable to finish sign-in.</p>' +
+          '<p>Please request a new magic link or verify the Supabase email template.</p>';
+        return;
+      }
+      window.location.replace(result.next);
+    })();
+  </script>
+</body>
+</html>`);
+  }
+
+  try {
+    const supabaseAuth = createPublicClient();
+    const result = code
+      ? await supabaseAuth.auth.exchangeCodeForSession(code)
+      : await supabaseAuth.auth.verifyOtp({
+          token_hash: tokenHash,
+          type
+        });
+    const { data, error } = result;
+    if (error || !data?.session?.user) {
+      throw error || new Error('Unable to create session');
+    }
+    setSessionCookies(res, data.session);
+    await ensureProfile(data.session.user);
+    return res.redirect(next);
+  } catch (error) {
+    return res.redirect(`/auth?error=${encodeURIComponent(error.message)}`);
+  }
+});
+
+app.post('/auth/callback/session', async (req, res) => {
+  const next = getSafeNextPath(req.query.next);
+  const accessToken = String(req.body.access_token || '');
+  const refreshToken = String(req.body.refresh_token || '');
+  if (!accessToken || !refreshToken) {
+    return res.status(400).json({ error: 'Missing access_token or refresh_token' });
+  }
+
+  try {
+    const supabaseAuth = createPublicClient();
+    const { data, error } = await supabaseAuth.auth.setSession({
+      access_token: accessToken,
+      refresh_token: refreshToken
+    });
+    if (error || !data?.session?.user) {
+      throw error || new Error('Unable to create session');
+    }
+    setSessionCookies(res, data.session);
+    await ensureProfile(data.session.user);
+    return res.json({ next });
+  } catch (error) {
+    return res.status(400).json({ error: error.message });
+  }
+});
+
+app.post('/auth/sign-out', async (req, res) => {
+  clearSessionCookies(res);
+  res.redirect('/');
+});
+
+app.get('/me', async (req, res) => {
+  try {
+    const auth = await getSessionContext(req, res);
+    if (!auth.user) return res.redirect('/auth');
+
+    const profile = auth.profile || await ensureProfile(auth.user);
+    const message = String(req.query.message || '');
+    const error = String(req.query.error || '');
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CHIIRL | My Profile</title>
+  <style>
+    ${renderLogoStyles()}
+    ${renderThemeStyles()}
+    body { font-family: arial, helvetica, sans-serif; font-size: 14px; background: #f0f0e8; color: #222; margin: 0; padding: 10px; }
+    .card { max-width: 640px; background: #fff; border: 1px solid #bbb; padding: 12px; margin-bottom: 12px; }
+    label { display: block; margin-bottom: 6px; font-weight: bold; }
+    input[type="text"] { width: 100%; box-sizing: border-box; padding: 8px; margin-bottom: 10px; }
+    .row { margin-bottom: 8px; }
+    .msg { max-width: 640px; padding: 8px 10px; border: 1px solid #bbb; margin-bottom: 10px; background: #fff; }
+    .err { border-color: #b33; background: #fff0f0; }
+    code { background: #eee; padding: 1px 4px; }
+  </style>
+</head>
+<body>
+  <img class="site-logo" src="/logo.png" alt="CHIIRL | Chicago In Real Life">
+  <h1>CHIIRL | My Profile</h1>
+  <p><a href="/">back to events</a></p>
+  ${message ? `<p class="msg">${escapeHtml(message)}</p>` : ''}
+  ${error ? `<p class="msg err">${escapeHtml(error)}</p>` : ''}
+  <div class="card">
+    <div class="row"><strong>Email:</strong> ${escapeHtml(auth.user.email || '')}</div>
+    <div class="row"><strong>Profile ID:</strong> <code>${escapeHtml(profile.id)}</code></div>
+    <div class="row"><strong>Profile Type:</strong> ${escapeHtml(profile.profile_type || 'person')}</div>
+  </div>
+  <form class="card" method="post" action="/me/profile">
+    <label for="display_name">Display Name</label>
+    <input id="display_name" name="display_name" type="text" maxlength="80" value="${escapeHtml(profile.display_name || '')}" required>
+    <label for="username">Username</label>
+    <input id="username" name="username" type="text" maxlength="40" value="${escapeHtml(profile.username || '')}" pattern="[a-z0-9_\\-]*">
+    <button type="submit">Save profile</button>
+  </form>
+  <form method="post" action="/auth/sign-out">
+    <button type="submit">Sign out</button>
+  </form>
+</body>
+</html>`;
+    return res.send(html);
+  } catch (error) {
+    return res.status(500).send(`Error loading profile: ${escapeHtml(error.message)}`);
+  }
+});
+
+app.post('/me/profile', async (req, res) => {
+  try {
+    const auth = await getSessionContext(req, res);
+    if (!auth.user) return res.redirect('/auth');
+
+    const displayName = String(req.body.display_name || '').trim();
+    const username = String(req.body.username || '').trim();
+    if (!displayName) {
+      return res.redirect('/me?error=Display%20name%20is%20required');
+    }
+    if (username && !/^[a-z0-9_-]+$/.test(username)) {
+      return res.redirect('/me?error=Username%20may%20only%20use%20lowercase%20letters,%20numbers,%20hyphens,%20and%20underscores');
+    }
+
+    await ensureProfile(auth.user);
+    await updateProfile(auth.user.id, {
+      display_name: displayName,
+      username
+    });
+    return res.redirect('/me?message=Profile%20saved');
+  } catch (error) {
+    const msg = error.code === '23505' ? 'Username already taken' : error.message;
+    return res.redirect(`/me?error=${encodeURIComponent(msg)}`);
+  }
+});
+
 app.get('/', async (req, res) => {
-  const requestedSource = getSource(req);
+  const auth = await getSessionContext(req, res);
   const view = getView(req);
-  const source = view === 'calendar' ? 'real' : requestedSource;
   const monthParam = String(req.query.month || '');
-  const tableName = getTableName(source);
   const { data: events, error } = await supabase
-    .from(tableName)
+    .from(EVENTS_TABLE_NAME)
     .select('*')
     .order('start_datetime', { ascending: true });
 
@@ -418,12 +726,11 @@ app.get('/', async (req, res) => {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>CHIIRL | Chicago In Real Life</title>
+  <title>Chicago In Real Life | The Top Tech & Startup Events</title>
   <style>
+    ${renderLogoStyles()}
+    ${renderThemeStyles()}
     body { font-family: arial, helvetica, sans-serif; font-size: 14px; background: #f0f0e8; color: #222; margin: 0; padding: 10px; }
-    a { color: #00c; }
-    a:visited { color: #551a8b; }
-    h1 { font-size: 18px; background: #800080; color: #fff; padding: 4px 8px; margin-bottom: 8px; }
     ul { list-style: none; padding: 0; max-width: 800px; }
     li { padding: 4px 0; border-bottom: 1px solid #ccc; display: flex; align-items: center; gap: 8px; }
     li img { width: 50px; height: 50px; object-fit: cover; border-radius: 4px; flex-shrink: 0; }
@@ -431,50 +738,41 @@ app.get('/', async (req, res) => {
     .loc { color: #888; font-size: 12px; }
     .tag { font-size: 11px; color: #555; }
     .tabs { margin-bottom: 10px; max-width: 800px; }
-    .tabs a { display: inline-block; padding: 4px 10px; margin-right: 4px; font-size: 12px; text-decoration: none; border: 1px solid #999; color: #222; background: #e8e8e0; }
-    .tabs a.active { background: #800080; color: #fff; border-color: #800080; }
-    .tabs a:visited { color: #222; }
-    .tabs a.active:visited { color: #fff; }
     .filters { margin-bottom: 10px; max-width: 800px; }
-    .filters a { display: inline-block; padding: 2px 8px; margin: 2px; font-size: 12px; text-decoration: none; border: 1px solid #999; color: #222; background: #e8e8e0; }
-    .filters a.active { background: #800080; color: #fff; border-color: #800080; }
-    .filters a:visited { color: #222; }
-    .filters a.active:visited { color: #fff; }
     pre.email-draft { max-width: 900px; white-space: pre-wrap; background: #fff; border: 1px solid #bbb; padding: 10px; font-family: "Courier New", monospace; line-height: 1.4; }
     .subtools { margin-bottom: 10px; max-width: 900px; font-size: 12px; }
     .copy-btn { font-size: 12px; padding: 2px 8px; }
     .calendar-wrap { max-width: 1000px; }
     .calendar-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
     .calendar-head .month { font-weight: bold; min-width: 180px; }
-    .calendar-head a { text-decoration: none; border: 1px solid #999; background: #e8e8e0; color: #222; padding: 2px 8px; font-size: 12px; }
     table.calendar { width: 100%; border-collapse: collapse; table-layout: fixed; background: #fff; }
     table.calendar th, table.calendar td { border: 1px solid #bbb; vertical-align: top; padding: 6px; }
     table.calendar th { background: #ddd; font-size: 12px; }
     table.calendar td { height: 120px; font-size: 12px; }
     .day-num { font-weight: bold; margin-bottom: 4px; }
     .day-muted { color: #999; background: #fafafa; }
-    .day-today { outline: 2px solid #800080; outline-offset: -2px; }
     .cal-event { margin: 2px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .cal-event a { text-decoration: underline; }
     .cal-time { color: #666; margin-right: 4px; }
   </style>
 </head>
 <body>
-  <h1>CHIIRL | Chicago In Real Life</h1>
+  <img class="site-logo" src="/logo.png" alt="CHIIRL | Chicago In Real Life">
+  <h1>Chicago In Real Life | The Top Tech & Startup Events</h1>
+  ${renderAuthLinks(auth)}
   <div class="tabs">
-    <a href="${buildUrl('/', 'real', { tag: tagFilter, mode: modeFilter, view, month: view === 'calendar' ? calendar.monthParam : '' })}"${source === 'real' ? ' class="active"' : ''}>Real Data</a>
-    <a href="${buildUrl('/', 'inaccurate', { tag: tagFilter, mode: modeFilter, view, month: view === 'calendar' ? calendar.monthParam : '' })}"${source === 'inaccurate' ? ' class="active"' : ''}>Inaccurate Data</a>
-    <a href="${buildUrl('/', source, { view: 'email' })}"${view === 'email' ? ' class="active"' : ''}>Email Draft</a>
-    <a href="${buildUrl('/', source, { view: 'calendar', month: calendar.monthParam })}"${view === 'calendar' ? ' class="active"' : ''}>Calendar</a>
+    <a href="${buildUrl('/', { tag: tagFilter, mode: modeFilter })}"${view === 'events' ? ' class="active"' : ''}>Events</a>
+    <a href="${buildUrl('/', { view: 'email' })}"${view === 'email' ? ' class="active"' : ''}>Email Draft</a>
+    <a href="${buildUrl('/', { view: 'calendar', month: calendar.monthParam })}"${view === 'calendar' ? ' class="active"' : ''}>Calendar</a>
   </div>
-  <p><a href="${buildUrl('/archive', source)}">archive</a> | <a href="${buildUrl('/raw', source)}">raw table</a></p>
+  <p><a href="${buildUrl('/archive')}">archive</a> | <a href="${buildUrl('/raw')}">raw table</a></p>
   ${view === 'events' ? `<div class="filters">
-    <a href="${buildUrl('/', source)}"${!tagFilter && !modeFilter ? ' class="active"' : ''}>All</a>
-    <a href="${buildUrl('/', source, { mode: 'irl', tag: tagFilter })}"${modeFilter === 'irl' ? ' class="active"' : ''}>IRL</a>
-    <a href="${buildUrl('/', source, { mode: 'online', tag: tagFilter })}"${modeFilter === 'online' ? ' class="active"' : ''}>Online</a>
+    <a href="${buildUrl('/')}"${!tagFilter && !modeFilter ? ' class="active"' : ''}>All</a>
+    <a href="${buildUrl('/', { mode: 'irl', tag: tagFilter })}"${modeFilter === 'irl' ? ' class="active"' : ''}>IRL</a>
+    <a href="${buildUrl('/', { mode: 'online', tag: tagFilter })}"${modeFilter === 'online' ? ' class="active"' : ''}>Online</a>
     |
-    ${tags.map(t => `<a href="${buildUrl('/', source, { tag: t, mode: modeFilter })}"${tagFilter === t ? ' class="active"' : ''}>${t}</a>`).join('')}
-  </div>` : view === 'email' ? `<div class="subtools"><a href="${buildUrl('/email.txt', source)}">plain text route</a> <button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('email-draft').innerText)">copy</button></div>` : ''}
+    ${tags.map(t => `<a href="${buildUrl('/', { tag: t, mode: modeFilter })}"${tagFilter === t ? ' class="active"' : ''}>${t}</a>`).join('')}
+  </div>` : view === 'email' ? `<div class="subtools"><a href="${buildUrl('/email.txt')}">plain text route</a> <button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('email-draft').innerText)">copy</button></div>` : ''}
   ${view === 'events' ? `<ul>
     ${filtered.map(e => `
       <li>
@@ -484,16 +782,16 @@ app.get('/', async (req, res) => {
         <span class="date">${formatChicagoDateTime(e.start_datetime)}</span>
         <span class="loc">${e.location || ''}</span>
         ${e.google_maps_url && e.Online !== 'TRUE' ? ` - <a href="${e.google_maps_url}">map</a>` : ''}
-        - <a href="${buildUrl('/event', source, { title: e.title, date: e.start_datetime || '' })}">raw</a>
+        - <a href="${buildUrl('/event', { title: e.title, date: e.start_datetime || '' })}">raw</a>
         </div>
       </li>
     `).join('')}
   </ul>` : view === 'email' ? `<pre id="email-draft" class="email-draft">${emailDraftHtml}</pre>` : `
   <div class="calendar-wrap">
     <div class="calendar-head">
-      <a href="${buildUrl('/', source, { view: 'calendar', month: calendar.prevMonthParam })}">&larr; Prev</a>
+      <a href="${buildUrl('/', { view: 'calendar', month: calendar.prevMonthParam })}">&larr; Prev</a>
       <span class="month">${escapeHtml(calendar.monthLabel)}</span>
-      <a href="${buildUrl('/', source, { view: 'calendar', month: calendar.nextMonthParam })}">Next &rarr;</a>
+      <a href="${buildUrl('/', { view: 'calendar', month: calendar.nextMonthParam })}">Next &rarr;</a>
     </div>
     <table class="calendar">
       <thead>
@@ -527,10 +825,8 @@ app.get('/', async (req, res) => {
 });
 
 app.get('/email.txt', async (req, res) => {
-  const source = getSource(req);
-  const tableName = getTableName(source);
   const { data: events, error } = await supabase
-    .from(tableName)
+    .from(EVENTS_TABLE_NAME)
     .select('*')
     .order('start_datetime', { ascending: true });
 
@@ -548,11 +844,9 @@ app.get('/email.txt', async (req, res) => {
 
 app.get('/event', async (req, res) => {
   const { title, date } = req.query;
-  const source = getSource(req);
-  const tableName = getTableName(source);
   if (!title) return res.status(400).send('Missing title');
 
-  let query = supabase.from(tableName).select('*').eq('title', title);
+  let query = supabase.from(EVENTS_TABLE_NAME).select('*').eq('title', title);
   if (date) query = query.eq('start_datetime', date);
   const { data, error } = await query;
 
@@ -569,14 +863,10 @@ app.get('/event', async (req, res) => {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${event.title} | CHIIRL</title>
   <style>
+    ${renderLogoStyles()}
+    ${renderThemeStyles()}
     body { font-family: arial, helvetica, sans-serif; font-size: 14px; background: #f0f0e8; color: #222; margin: 0; padding: 10px; }
-    a { color: #00c; }
-    h1 { font-size: 18px; background: #800080; color: #fff; padding: 4px 8px; margin-bottom: 8px; }
     .tabs { margin-bottom: 10px; max-width: 800px; }
-    .tabs a { display: inline-block; padding: 4px 10px; margin-right: 4px; font-size: 12px; text-decoration: none; border: 1px solid #999; color: #222; background: #e8e8e0; }
-    .tabs a.active { background: #800080; color: #fff; border-color: #800080; }
-    .tabs a:visited { color: #222; }
-    .tabs a.active:visited { color: #fff; }
     table { border-collapse: collapse; max-width: 800px; }
     th, td { border: 1px solid #999; padding: 4px 8px; text-align: left; vertical-align: top; }
     th { background: #ddd; width: 150px; }
@@ -584,12 +874,10 @@ app.get('/event', async (req, res) => {
   </style>
 </head>
 <body>
+  <img class="site-logo" src="/logo.png" alt="CHIIRL | Chicago In Real Life">
   <h1>${event.title}</h1>
-  <div class="tabs">
-    <a href="${buildUrl('/event', 'real', { title, date })}"${source === 'real' ? ' class="active"' : ''}>Real Data</a>
-    <a href="${buildUrl('/event', 'inaccurate', { title, date })}"${source === 'inaccurate' ? ' class="active"' : ''}>Inaccurate Data</a>
-  </div>
-  <p><a href="${buildUrl('/', source)}">back</a></p>
+  ${renderAuthLinks(await getSessionContext(req, res))}
+  <p><a href="${buildUrl('/')}">back</a></p>
   <table>
     ${fields.map(([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join('')}
   </table>
@@ -600,10 +888,9 @@ app.get('/event', async (req, res) => {
 });
 
 app.get('/archive', async (req, res) => {
-  const source = getSource(req);
-  const tableName = getTableName(source);
+  const auth = await getSessionContext(req, res);
   const { data: events, error } = await supabase
-    .from(tableName)
+    .from(EVENTS_TABLE_NAME)
     .select('*')
     .order('start_datetime', { ascending: false });
 
@@ -616,10 +903,9 @@ app.get('/archive', async (req, res) => {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>CHIIRL | Archive</title>
   <style>
+    ${renderLogoStyles()}
+    ${renderThemeStyles()}
     body { font-family: arial, helvetica, sans-serif; font-size: 14px; background: #f0f0e8; color: #222; margin: 0; padding: 10px; }
-    a { color: #00c; }
-    a:visited { color: #551a8b; }
-    h1 { font-size: 18px; background: #800080; color: #fff; padding: 4px 8px; margin-bottom: 8px; }
     ul { list-style: none; padding: 0; max-width: 800px; }
     li { padding: 4px 0; border-bottom: 1px solid #ccc; display: flex; align-items: center; gap: 8px; }
     li img { width: 50px; height: 50px; object-fit: cover; border-radius: 4px; flex-shrink: 0; }
@@ -627,19 +913,13 @@ app.get('/archive', async (req, res) => {
     .loc { color: #888; font-size: 12px; }
     .tag { font-size: 11px; color: #555; }
     .tabs { margin-bottom: 10px; max-width: 800px; }
-    .tabs a { display: inline-block; padding: 4px 10px; margin-right: 4px; font-size: 12px; text-decoration: none; border: 1px solid #999; color: #222; background: #e8e8e0; }
-    .tabs a.active { background: #800080; color: #fff; border-color: #800080; }
-    .tabs a:visited { color: #222; }
-    .tabs a.active:visited { color: #fff; }
   </style>
 </head>
 <body>
+  <img class="site-logo" src="/logo.png" alt="CHIIRL | Chicago In Real Life">
   <h1>CHIIRL | Archive</h1>
-  <div class="tabs">
-    <a href="${buildUrl('/archive', 'real')}"${source === 'real' ? ' class="active"' : ''}>Real Data</a>
-    <a href="${buildUrl('/archive', 'inaccurate')}"${source === 'inaccurate' ? ' class="active"' : ''}>Inaccurate Data</a>
-  </div>
-  <p><a href="${buildUrl('/', source)}">back to upcoming</a></p>
+  ${renderAuthLinks(auth)}
+  <p><a href="${buildUrl('/')}">back to upcoming</a></p>
   <ul>
     ${events.map(e => `
       <li>
@@ -648,7 +928,7 @@ app.get('/archive', async (req, res) => {
         <span class="tag">(${e.Online === 'TRUE' ? 'Online' : 'IRL'})</span><br>
         <span class="date">${formatChicagoDateTime(e.start_datetime, true)}</span>
         <span class="loc">${e.location || ''}</span>
-        - <a href="${buildUrl('/event', source, { title: e.title, date: e.start_datetime || '' })}">raw</a>
+        - <a href="${buildUrl('/event', { title: e.title, date: e.start_datetime || '' })}">raw</a>
         </div>
       </li>
     `).join('')}
@@ -660,10 +940,9 @@ app.get('/archive', async (req, res) => {
 });
 
 app.get('/raw', async (req, res) => {
-  const source = getSource(req);
-  const tableName = getTableName(source);
+  const auth = await getSessionContext(req, res);
   const { data: events, error } = await supabase
-    .from(tableName)
+    .from(EVENTS_TABLE_NAME)
     .select('*')
     .order('start_datetime', { ascending: true });
 
@@ -678,14 +957,10 @@ app.get('/raw', async (req, res) => {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>CHIIRL | Raw Data</title>
   <style>
+    ${renderLogoStyles()}
+    ${renderThemeStyles()}
     body { font-family: arial, helvetica, sans-serif; font-size: 12px; background: #f0f0e8; color: #222; margin: 0; padding: 10px; }
-    a { color: #00c; }
-    h1 { font-size: 18px; background: #800080; color: #fff; padding: 4px 8px; margin-bottom: 8px; }
     .tabs { margin-bottom: 10px; max-width: 100%; }
-    .tabs a { display: inline-block; padding: 4px 10px; margin-right: 4px; font-size: 12px; text-decoration: none; border: 1px solid #999; color: #222; background: #e8e8e0; }
-    .tabs a.active { background: #800080; color: #fff; border-color: #800080; }
-    .tabs a:visited { color: #222; }
-    .tabs a.active:visited { color: #fff; }
     table { border-collapse: collapse; width: 100%; }
     th, td { border: 1px solid #999; padding: 3px 6px; text-align: left; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     th { background: #ddd; position: sticky; top: 0; }
@@ -693,12 +968,10 @@ app.get('/raw', async (req, res) => {
   </style>
 </head>
 <body>
+  <img class="site-logo" src="/logo.png" alt="CHIIRL | Chicago In Real Life">
   <h1>CHIIRL | Raw Data</h1>
-  <div class="tabs">
-    <a href="${buildUrl('/raw', 'real')}"${source === 'real' ? ' class="active"' : ''}>Real Data</a>
-    <a href="${buildUrl('/raw', 'inaccurate')}"${source === 'inaccurate' ? ' class="active"' : ''}>Inaccurate Data</a>
-  </div>
-  <p><a href="${buildUrl('/', source)}">back</a></p>
+  ${renderAuthLinks(auth)}
+  <p><a href="${buildUrl('/')}">back</a></p>
   <table>
     <tr>${cols.map(c => `<th>${c}</th>`).join('')}</tr>
     ${events.map(e => `<tr>${cols.map(c => `<td>${e[c] != null ? e[c] : ''}</td>`).join('')}</tr>`).join('')}
