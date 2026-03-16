@@ -34,9 +34,10 @@ Create `.env`:
 
 ```bash
 SUPABASE_URL=https://<project>.supabase.co
+SUPABASE_PUBLISHABLE_KEY=<anon_or_publishable_key>
 SUPABASE_SECRET_KEY=<service_role_or_secret_key>
 SUPABASE_TABLE=beta_chiirl_events
-SUPABASE_INACCURATE_TABLE=CTC Current Events
+APP_BASE_URL=http://localhost:3000
 ```
 
 ## Install
@@ -109,6 +110,48 @@ Dev mode:
 npm run dev
 ```
 
+## Auth + Profiles
+
+The Express app now includes a minimal Supabase Auth flow for CHIIRL:
+- `GET /auth` shows email magic-link sign-in
+- `GET /auth/callback` verifies the magic-link token and creates a session
+- `GET /me` shows the authenticated user and bootstrapped profile
+- `GET /api/me` returns the current auth user + profile as JSON
+
+This app follows the server-side Supabase email flow using `token_hash`.
+The default Supabase magic-link template that returns `#access_token=...` in the URL fragment is not used here.
+
+Before using those routes, create the shared `ctc_v2_profiles` table:
+
+```bash
+psql "$DATABASE_URL" -f sql/create_ctc_v2_profiles_table.sql
+```
+
+The first successful sign-in creates a `ctc_v2_profiles` row with:
+- `id` = Supabase Auth user id
+- `email`
+- `display_name`
+- `profile_type = person`
+- optional `avatar_url`
+
+`username` can be edited later on `/me`.
+
+### Supabase Email Template
+
+In Supabase `Authentication` -> `Email Templates` -> Magic Link, use a link that sends `token_hash` to this app's callback via `{{ .RedirectTo }}`:
+
+```html
+<a href="{{ .RedirectTo }}&token_hash={{ .TokenHash }}&type=email">
+  Sign in to CHIIRL
+</a>
+```
+
+Recommended URL setup:
+- `Site URL`: `http://localhost:3000` in local dev
+- Redirect allowlist should include `http://localhost:3000/auth/callback`
+
+When CHIIRL sends the email, it sets `redirectTo` to `http://localhost:3000/auth/callback?next=%2Fme`, and the email template appends the one-time `token_hash` for server-side verification.
+
 ## Data Notes
 
 `chibot` writes rows to `beta_chiirl_events` using fields like:
@@ -131,4 +174,3 @@ It de-duplicates by existing `eventUrl` values before insert.
   - Some pages are gated or malformed; try Meetup auth mode for Meetup links.
 - `unsupported host`
   - Current first-class hosts: Luma, Meetup, mHUB, Eventbrite.
-
