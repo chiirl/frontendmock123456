@@ -119,9 +119,10 @@ function canonicalizeUrl(input) {
   try {
     const u = new URL(input);
     const host = u.hostname.toLowerCase();
-    if (host.includes('luma.com')) {
-      const id = (u.pathname || '').split('/').filter(Boolean)[0];
-      if (!id) return null;
+    if (host.includes('luma.com') || host.includes('lu.ma')) {
+      const parts = (u.pathname || '').split('/').filter(Boolean);
+      const id = parts[0];
+      if (!id || parts.length !== 1 || id.startsWith('@') || LUMA_NON_EVENT_ROUTES.test(id)) return null;
       return `https://luma.com/${id}`;
     }
     if (host.includes('mhubchicago.com')) {
@@ -131,8 +132,9 @@ function canonicalizeUrl(input) {
     if (host.includes('meetup.com')) {
       const parts = (u.pathname || '').split('/').filter(Boolean);
       const eventsIdx = parts.findIndex((p) => p.toLowerCase() === 'events');
-      if (eventsIdx >= 1 && parts[eventsIdx + 1]) {
-        return `https://www.meetup.com/${parts[eventsIdx - 1]}/events/${parts[eventsIdx + 1]}`;
+      const eventId = parts[eventsIdx + 1];
+      if (eventsIdx >= 1 && eventId && /^\d+$/.test(eventId) && !MEETUP_NON_EVENT_SEGMENTS.has(eventId.toLowerCase())) {
+        return `https://www.meetup.com/${parts[eventsIdx - 1]}/events/${eventId}`;
       }
       const path = (u.pathname || '').replace(/\/+$/, '');
       return `https://www.meetup.com${path}`;
@@ -152,8 +154,11 @@ function canonicalizeUrl(input) {
 // Per-host throttle: serializes requests to the same host with a delay
 // between them so concurrent workers don't burst the same domain.
 // ---------------------------------------------------------------------------
-const HOST_DELAY_MS = 800;
+const HOST_DELAY_MS = 200;
 const _hostQueues = new Map();
+
+const LUMA_NON_EVENT_ROUTES = /^(chicago|new-york|sf|explore|pricing|about|blog|login|signin|signup|search|discover)$/i;
+const MEETUP_NON_EVENT_SEGMENTS = new Set(['calendar', 'past', 'about', 'photos']);
 
 async function hostThrottle(host) {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -727,9 +732,9 @@ function extractEventUrlsFromListing(html) {
       const path = u.pathname;
 
       // Luma event pages: /slug-id (single path segment, not a known non-event route)
-      if (host.includes('luma.com')) {
+      if (host.includes('luma.com') || host.includes('lu.ma')) {
         const parts = path.split('/').filter(Boolean);
-        if (parts.length === 1 && !/^(chicago|new-york|sf|explore|pricing|about|blog|login|signup|search)$/i.test(parts[0])) {
+        if (parts.length === 1 && !parts[0].startsWith('@') && !LUMA_NON_EVENT_ROUTES.test(parts[0])) {
           urls.add(`https://luma.com/${parts[0]}`);
         }
       }
@@ -738,8 +743,9 @@ function extractEventUrlsFromListing(html) {
       if (host.includes('meetup.com')) {
         const parts = path.split('/').filter(Boolean);
         const evIdx = parts.findIndex((p) => p.toLowerCase() === 'events');
-        if (evIdx >= 1 && parts[evIdx + 1]) {
-          urls.add(`https://www.meetup.com/${parts[evIdx - 1]}/events/${parts[evIdx + 1]}`);
+        const eventId = parts[evIdx + 1];
+        if (evIdx >= 1 && eventId && /^\d+$/.test(eventId) && !MEETUP_NON_EVENT_SEGMENTS.has(eventId.toLowerCase())) {
+          urls.add(`https://www.meetup.com/${parts[evIdx - 1]}/events/${eventId}`);
         }
       }
 
@@ -958,17 +964,17 @@ async function loadCandidateUrls(opts) {
 }
 
 // ---------------------------------------------------------------------------
-// Load seed event URLs from DB. When weeklyMode is true, only load future
-// events as seeds (cheaper), but use the full history for org extraction.
+// Load current/future seed event URLs from DB. Routine discovery relies on
+// upcoming events instead of re-mining the full event history each run.
 // ---------------------------------------------------------------------------
 async function loadSeedUrlsFromDb(supabase, scanLimit, weeklyMode = false) {
   const out = new Set();
-  const allHistoryUrls = [];
   const tables = [
     process.env.SUPABASE_TABLE || 'beta_chiirl_events',
     process.env.SUPABASE_INACCURATE_TABLE || 'CTC Current Events'
   ];
   const ctcW3WBoost = [];
+  const now = new Date().toISOString();
 
   for (const table of tables) {
     const { data, error } = await supabase
@@ -977,19 +983,12 @@ async function loadSeedUrlsFromDb(supabase, scanLimit, weeklyMode = false) {
       .limit(5000);
     if (error) continue;
 
-    const now = new Date().toISOString();
     for (const row of data || []) {
       const normalized = canonicalizeEventUrl(String(row.eventUrl || '').trim());
       if (!normalized) continue;
 
-      // Always collect for org extraction.
-      allHistoryUrls.push(normalized);
-
-      // In weekly mode, only use future/recent events as direct seeds.
-      if (weeklyMode) {
-        const dt = row.start_datetime || '';
-        if (dt && dt < now) continue;
-      }
+      const dt = row.start_datetime || '';
+      if (dt && dt < now) continue;
 
       out.add(normalized);
 
@@ -1002,8 +1001,7 @@ async function loadSeedUrlsFromDb(supabase, scanLimit, weeklyMode = false) {
 
   const prioritized = [...new Set([...ctcW3WBoost, ...out])];
   return {
-    seedUrls: prioritized.slice(0, scanLimit),
-    allHistoryUrls
+    seedUrls: prioritized.slice(0, weeklyMode ? scanLimit : Math.max(scanLimit, prioritized.length))
   };
 }
 
@@ -1154,27 +1152,25 @@ async function main() {
         console.log(`City listing unavailable (${err.message}); continuing with DB seeds.`);
       }
 
-      const { seedUrls: dbSeedEventUrls, allHistoryUrls } = await loadSeedUrlsFromDb(
+      const { seedUrls: dbSeedEventUrls } = await loadSeedUrlsFromDb(
         supabase,
         opts.seedScan,
         opts.weekly
       );
-      console.log(`DB seeds: ${dbSeedEventUrls.length} event URLs, ${allHistoryUrls.length} total history URLs.`);
+      console.log(`DB current seeds: ${dbSeedEventUrls.length} event URLs.`);
 
-      // Derive org/group listing pages from ALL historical event URLs.
-      const orgUrls = extractOrgUrlsFromEventUrls(allHistoryUrls);
-      console.log(`Derived ${orgUrls.length} unique org/group listing URLs from DB history.`);
+      // Derive org/group listing pages from current/upcoming event URLs.
+      const orgUrls = extractOrgUrlsFromEventUrls(dbSeedEventUrls);
+      console.log(`Derived ${orgUrls.length} unique org/group listing URLs from current DB events.`);
 
-      // Mine organizer/calendar pages from historical event pages.
-      // Luma event URLs don't reveal the org, so we must fetch them to find
-      // organizer links. For non-Luma we already derived orgs from the URL.
+      // Mine organizer/calendar pages from current Luma event pages only.
+      // Luma event URLs don't reveal the org, so we fetch current events to
+      // discover their calendar pages instead of reprocessing full history.
       const seedPageUrls = new Set(orgUrls);
-      const lumaHistoryUrls = allHistoryUrls.filter((u) => isLumaUrl(u));
-      const nonLumaToMine = dbSeedEventUrls.filter((u) => !isLumaUrl(u)).slice(0, 40);
-      const eventsToMine = [...lumaHistoryUrls, ...nonLumaToMine];
-      console.log(`Mining ${lumaHistoryUrls.length} Luma + ${nonLumaToMine.length} other event pages for org links...`);
+      const lumaSeedUrls = dbSeedEventUrls.filter((u) => isLumaUrl(u));
+      console.log(`Mining ${lumaSeedUrls.length} current Luma event pages for org links...`);
       await parallelMap(
-        eventsToMine,
+        lumaSeedUrls,
         async (eventUrl) => {
           try {
             const html = await fetchText(eventUrl);
@@ -1190,11 +1186,11 @@ async function main() {
 
       candidateUrls = await expandCandidatesFromSeeds(
         [...new Set([...cityCandidateUrls, ...dbSeedEventUrls])],
-        [...seedPageUrls].slice(0, opts.seedPages + orgUrls.length),
+        [...seedPageUrls].slice(0, Math.max(opts.seedPages, seedPageUrls.size)),
         opts.max,
         opts.concurrency
       );
-      console.log(`Found ${candidateUrls.length} candidate URLs (city+db-seeds+orgs).`);
+      console.log(`Found ${candidateUrls.length} candidate URLs (city+current-db-seeds+orgs).`);
     }
 
     const includeTagsColumn = await hasTagsColumn(supabase, table);

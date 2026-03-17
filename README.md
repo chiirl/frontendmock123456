@@ -54,9 +54,9 @@ npx playwright install chromium
 
 ## How To Use
 
-### 1. Discovery mode (broad crawl)
+### 1. Discovery mode (routine crawl)
 
-Scrapes Luma city listing + seed expansion, filters to relevant Chicago ecosystem events, then inserts new rows.
+Scrapes the Luma city listing, expands from current/upcoming event seeds already in Supabase, filters to relevant Chicago ecosystem events, then inserts new rows.
 
 ```bash
 node scripts/chibot.js --city chicago --max 30
