@@ -37,6 +37,25 @@ const EXCLUDE_KEYWORDS = [
   'art exhibit'
 ];
 
+const SCRAPE_DUMP_DIR = '.scrape-dumps';
+const SEED_PAGE_CACHE_FILE = 'seed-pages-cache.json';
+const FETCH_TIMEOUT_MS = 10000;
+const FETCH_TOTAL_BUDGET_MS = 15000;
+const MAX_FETCH_ATTEMPTS = 3;
+const DEFAULT_HOST_POLICY = { concurrency: 1, delayMs: 200 };
+const HOST_POLICIES = {
+  'luma.com': { concurrency: 1, delayMs: 300 },
+  'lu.ma': { concurrency: 1, delayMs: 300 },
+  'www.meetup.com': { concurrency: 2, delayMs: 150 },
+  'meetup.com': { concurrency: 2, delayMs: 150 },
+  'www.eventbrite.com': { concurrency: 2, delayMs: 150 },
+  'eventbrite.com': { concurrency: 2, delayMs: 150 },
+  'www.mhubchicago.com': { concurrency: 1, delayMs: 150 }
+};
+const LUMA_HOSTS = new Set(['luma.com', 'lu.ma']);
+const _hostRuntimePolicies = new Map();
+const _hostStats = new Map();
+
 function parseArgs(argv) {
   const opts = {
     city: 'chicago',
@@ -49,7 +68,9 @@ function parseArgs(argv) {
     urls: [],
     strictUrls: false,
     meetupAuth: false,
-    meetupState: '.auth/meetup-state.json'
+    meetupState: '.auth/meetup-state.json',
+    lumaConcurrency: null,
+    lumaDelayMs: null
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -93,6 +114,16 @@ function parseArgs(argv) {
     }
     if (arg === '--meetup-state') {
       opts.meetupState = argv[i + 1] || opts.meetupState;
+      i += 1;
+      continue;
+    }
+    if (arg === '--luma-concurrency') {
+      opts.lumaConcurrency = Number(argv[i + 1] || opts.lumaConcurrency);
+      i += 1;
+      continue;
+    }
+    if (arg === '--luma-delay-ms') {
+      opts.lumaDelayMs = Number(argv[i + 1] || opts.lumaDelayMs);
       i += 1;
       continue;
     }
@@ -141,10 +172,24 @@ function canonicalizeUrl(input) {
     }
     if (host.includes('eventbrite.com')) {
       const path = (u.pathname || '').replace(/\/+$/, '');
+      if (!/^\/e\//.test(path)) return null;
       return `https://www.eventbrite.com${path}`;
     }
+    if (host.includes('letsdofunthings.org')) {
+      const path = (u.pathname || '').replace(/\/+$/, '');
+      if (!/^\/events\//.test(path)) return null;
+      return `https://www.letsdofunthings.org${path}`;
+    }
+    if (
+      host.includes('startupgrind.com') ||
+      host === 'fi.co' ||
+      host.includes('uchicago.edu') ||
+      host.includes('maps.apple.com')
+    ) {
+      return null;
+    }
     u.hash = '';
-    return u.toString();
+    return null;
   } catch {
     return null;
   }
@@ -154,55 +199,205 @@ function canonicalizeUrl(input) {
 // Per-host throttle: serializes requests to the same host with a delay
 // between them so concurrent workers don't burst the same domain.
 // ---------------------------------------------------------------------------
-const HOST_DELAY_MS = 200;
-const _hostQueues = new Map();
+const _hostLanes = new Map();
 
-const LUMA_NON_EVENT_ROUTES = /^(chicago|new-york|sf|explore|pricing|about|blog|login|signin|signup|search|discover)$/i;
+const LUMA_NON_EVENT_ROUTES = /^(chicago|new-york|sf|explore|pricing|about|blog|login|signin|signup|search|discover|create|ios|android|download|app)$/i;
 const MEETUP_NON_EVENT_SEGMENTS = new Set(['calendar', 'past', 'about', 'photos']);
 
-async function hostThrottle(host) {
+function getHostPolicy(host) {
+  return _hostRuntimePolicies.get(host) || HOST_POLICIES[host] || DEFAULT_HOST_POLICY;
+}
+
+function getHostStats(host) {
+  if (!_hostStats.has(host)) {
+    _hostStats.set(host, {
+      requests: 0,
+      ok: 0,
+      status429: 0,
+      failures: 0,
+      timeouts: 0,
+      adapted: false,
+      promoted: false
+    });
+  }
+  return _hostStats.get(host);
+}
+
+function resetHostRuntimePolicies(opts) {
+  _hostRuntimePolicies.clear();
+  _hostStats.clear();
+
+  if (opts?.lumaConcurrency || opts?.lumaDelayMs) {
+    const base = HOST_POLICIES['luma.com'];
+    const override = {
+      concurrency: opts.lumaConcurrency || base.concurrency,
+      delayMs: opts.lumaDelayMs || base.delayMs
+    };
+    for (const host of LUMA_HOSTS) {
+      _hostRuntimePolicies.set(host, { ...override });
+    }
+  }
+}
+
+function maybeAdaptHostPolicy(host, status) {
+  if (!LUMA_HOSTS.has(host) || status !== 429) return;
+
+  const current = { ...getHostPolicy(host) };
+  const stats = getHostStats(host);
+  stats.status429 += 1;
+
+  const next = {
+    concurrency: 1,
+    delayMs: Math.max(600, current.delayMs + 200)
+  };
+
+  const changed =
+    current.concurrency !== next.concurrency ||
+    current.delayMs !== next.delayMs;
+
+  for (const lumaHost of LUMA_HOSTS) {
+    _hostRuntimePolicies.set(lumaHost, { ...next });
+  }
+
+  if (changed && !stats.adapted) {
+    console.log(
+      `Luma adaptive backoff engaged after 429: concurrency ${current.concurrency} -> ${next.concurrency}, delay ${current.delayMs}ms -> ${next.delayMs}ms`
+    );
+  }
+  stats.adapted = true;
+}
+
+function maybePromoteHostPolicy(host) {
+  if (!LUMA_HOSTS.has(host)) return;
+  const stats = getHostStats(host);
+  if (stats.promoted || stats.status429 > 0 || stats.ok < 8) return;
+
+  const current = { ...getHostPolicy(host) };
+  if (current.concurrency >= 2 && current.delayMs <= 200) {
+    stats.promoted = true;
+    return;
+  }
+
+  const next = {
+    concurrency: 2,
+    delayMs: 200
+  };
+
+  for (const lumaHost of LUMA_HOSTS) {
+    _hostRuntimePolicies.set(lumaHost, { ...next });
+  }
+
+  stats.promoted = true;
+  console.log(
+    `Luma adaptive ramp-up engaged after clean streak: concurrency ${current.concurrency} -> ${next.concurrency}, delay ${current.delayMs}ms -> ${next.delayMs}ms`
+  );
+}
+
+async function withHostThrottle(host, fn) {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const prev = _hostQueues.get(host) || Promise.resolve();
-  const ticket = prev.then(() => sleep(HOST_DELAY_MS));
-  _hostQueues.set(host, ticket);
-  await ticket;
+  const { concurrency, delayMs } = getHostPolicy(host);
+  let lanes = _hostLanes.get(host);
+  if (!lanes || lanes.length !== concurrency) {
+    lanes = Array.from({ length: concurrency }, () => ({
+      readyAt: 0,
+      promise: Promise.resolve()
+    }));
+    _hostLanes.set(host, lanes);
+  }
+
+  let lane = lanes[0];
+  for (const candidate of lanes) {
+    if (candidate.readyAt < lane.readyAt) lane = candidate;
+  }
+
+  const scheduledStart = Math.max(Date.now(), lane.readyAt);
+  lane.readyAt = scheduledStart + delayMs;
+  lane.promise = lane.promise
+    .catch(() => {})
+    .then(async () => {
+      const waitMs = scheduledStart - Date.now();
+      if (waitMs > 0) await sleep(waitMs);
+      return fn();
+    });
+
+  return lane.promise;
 }
 
 async function fetchText(url) {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const maxAttempts = 4;
   let lastStatus = 'network';
-
-  // Serialize per-host: only one in-flight request per domain at a time,
-  // with HOST_DELAY_MS between consecutive requests.
+  const startedAt = Date.now();
+  let host = null;
   try {
-    const host = new URL(url).hostname.toLowerCase();
-    await hostThrottle(host);
+    host = new URL(url).hostname.toLowerCase();
   } catch {
-    // Not a valid URL — will fail below anyway.
+    host = null;
+  }
+  if (host) {
+    getHostStats(host).requests += 1;
   }
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 20000);
+  for (let attempt = 1; attempt <= MAX_FETCH_ATTEMPTS; attempt += 1) {
+    if (Date.now() - startedAt >= FETCH_TOTAL_BUDGET_MS) break;
+
+    const attemptFetch = async () => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+      try {
+        return await fetch(url, {
+          headers: {
+            'user-agent': 'chibot/1.0 (+chiirl)'
+          },
+          signal: controller.signal
+        });
+      } finally {
+        clearTimeout(timeout);
+      }
+    };
+
     let res;
     try {
-      res = await fetch(url, {
-        headers: {
-          'user-agent': 'chibot/1.0 (+chiirl)'
-        },
-        signal: controller.signal
-      });
-    } finally {
-      clearTimeout(timeout);
-    }
-    const status = res.status;
-    lastStatus = status;
-    if (res.ok) return res.text();
-
-    if (status === 429 || (status >= 500 && status < 600)) {
-      await sleep(2000 * attempt * attempt);
+      res = host ? await withHostThrottle(host, attemptFetch) : await attemptFetch();
+    } catch (error) {
+      lastStatus = error.name === 'AbortError' ? 'timeout' : 'network';
+      if (host) {
+        const stats = getHostStats(host);
+        if (lastStatus === 'timeout') stats.timeouts += 1;
+        else stats.failures += 1;
+      }
+      if (attempt >= MAX_FETCH_ATTEMPTS) break;
+      const remaining = FETCH_TOTAL_BUDGET_MS - (Date.now() - startedAt);
+      const backoff = Math.min(2000 * attempt, 3000);
+      if (remaining <= backoff) break;
+      await sleep(backoff);
       continue;
+    }
+
+    lastStatus = res.status;
+    if (res.ok) {
+      if (host) {
+        const stats = getHostStats(host);
+        stats.ok += 1;
+        maybePromoteHostPolicy(host);
+      }
+      return res.text();
+    }
+
+    if (res.status === 429 || (res.status >= 500 && res.status < 600)) {
+      if (host) {
+        if (res.status === 429) maybeAdaptHostPolicy(host, 429);
+        else getHostStats(host).failures += 1;
+      }
+      if (attempt >= MAX_FETCH_ATTEMPTS) break;
+      const remaining = FETCH_TOTAL_BUDGET_MS - (Date.now() - startedAt);
+      const backoff = Math.min(2000 * attempt, 3000);
+      if (remaining <= backoff) break;
+      await sleep(backoff);
+      continue;
+    }
+    if (host) {
+      if (res.status === 429) maybeAdaptHostPolicy(host, 429);
+      else getHostStats(host).failures += 1;
     }
     break;
   }
@@ -226,6 +421,65 @@ async function parallelMap(items, fn, limit = 8) {
   const workers = Array.from({ length: Math.min(limit, items.length) }, () => worker());
   await Promise.all(workers);
   return results;
+}
+
+function timestampForFilename(date = new Date()) {
+  return date.toISOString().replace(/[:.]/g, '-');
+}
+
+function ensureScrapeDumpDir() {
+  const dir = `${process.cwd()}/${SCRAPE_DUMP_DIR}`;
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function writeScrapeDump(payload) {
+  const dir = ensureScrapeDumpDir();
+  const filename = `chibot-${timestampForFilename()}.json`;
+  const filePath = `${dir}/${filename}`;
+  fs.writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+  return filePath;
+}
+
+function getSeedPageCachePath() {
+  return `${ensureScrapeDumpDir()}/${SEED_PAGE_CACHE_FILE}`;
+}
+
+function loadSeedPageCache() {
+  const filePath = getSeedPageCachePath();
+  if (!fs.existsSync(filePath)) {
+    return {
+      seed_pages: [],
+      mined_event_urls: [],
+      updated_at: null
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    return {
+      seed_pages: Array.isArray(parsed.seed_pages) ? parsed.seed_pages : [],
+      mined_event_urls: Array.isArray(parsed.mined_event_urls) ? parsed.mined_event_urls : [],
+      updated_at: parsed.updated_at || null
+    };
+  } catch {
+    return {
+      seed_pages: [],
+      mined_event_urls: [],
+      updated_at: null
+    };
+  }
+}
+
+function saveSeedPageCache(payload) {
+  const filePath = getSeedPageCachePath();
+  const normalized = {
+    seed_pages: [...new Set((payload.seed_pages || []).filter(Boolean))].sort(),
+    mined_event_urls: [...new Set((payload.mined_event_urls || []).filter(Boolean))].sort(),
+    updated_at: new Date().toISOString()
+  };
+  fs.writeFileSync(filePath, `${JSON.stringify(normalized, null, 2)}\n`, 'utf8');
+  return filePath;
 }
 
 function parseMhubStartDate(raw) {
@@ -274,7 +528,7 @@ function extractByIdText(html, id) {
   return decodeHtmlEntities(m[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
 }
 
-function parseMhubEvent(html, sourceUrl, includeTagsColumn) {
+function parseMhubEvent(html, sourceUrl) {
   const title = extractByIdText(html, 'evTitle') || decodeHtmlEntities(extractMetaContent(html, 'property', 'og:title'));
   const startRaw = extractByIdText(html, 'startDate');
   const startDatetime = parseMhubStartDate(startRaw);
@@ -283,22 +537,16 @@ function parseMhubEvent(html, sourceUrl, includeTagsColumn) {
   const image = extractMetaContent(html, 'property', 'og:image');
   if (!title || !startDatetime) return null;
 
-  const tags = inferEventTags(title, description);
-  const primary = inferTechCategory(title, description);
-  const normalizedTags = [primary, ...tags.filter((t) => t !== primary)].slice(0, 12);
   const row = {
     title,
     start_datetime: startDatetime,
     Online: /\bvirtual\b|\bonline\b/i.test(location || '') ? 'TRUE' : 'FALSE',
-    tags: normalizedTags,
+    ...inferEventTaxonomy(title, description, [location, sourceUrl]),
     image_url: image || null,
     eventUrl: sourceUrl,
     location: location || null,
     google_maps_url: null
   };
-  if (!includeTagsColumn) {
-    throw new Error('Missing `tags` column on target table. Add tags text[] before running chibot.');
-  }
   return row;
 }
 
@@ -338,10 +586,10 @@ function isEventbriteUrl(url) {
 // ---------------------------------------------------------------------------
 // Process a single URL — returns { row } or { skip }.
 // ---------------------------------------------------------------------------
-async function fetchSingleEventRow(url, includeTagsColumn, strictUrlsMode) {
+async function fetchSingleEventRow(url, strictUrlsMode) {
   const html = await fetchText(url);
   if (isMhubUrl(url)) {
-    const row = parseMhubEvent(html, url, includeTagsColumn);
+    const row = parseMhubEvent(html, url);
     if (!row) return { skip: { url, reason: 'missing mHUB title/date' } };
     return { row };
   }
@@ -354,7 +602,7 @@ async function fetchSingleEventRow(url, includeTagsColumn, strictUrlsMode) {
   const ogImage = extractMetaContent(html, 'property', 'og:image');
   if (!event) {
     if (isMeetupUrl(url) && globalMeetupFallback?.enabled) {
-      const row = await fetchMeetupEventViaBrowser(url, includeTagsColumn);
+      const row = await fetchMeetupEventViaBrowser(url);
       if (row) return { row };
     }
     return { skip: { url, reason: 'missing event JSON-LD' } };
@@ -373,32 +621,53 @@ async function fetchSingleEventRow(url, includeTagsColumn, strictUrlsMode) {
     }
   }
 
-  return { row: mapToRow(event, url, ogImage, includeTagsColumn) };
+  return { row: mapToRow(event, url, ogImage) };
 }
 
 // ---------------------------------------------------------------------------
 // Fetch event rows with concurrency control.
 // ---------------------------------------------------------------------------
-async function fetchEventRows(urls, includeTagsColumn, strictUrlsMode = false, concurrency = 8) {
+async function fetchEventRows(urls, strictUrlsMode = false, concurrency = 8) {
   const rows = [];
   const skipped = [];
+  let processed = 0;
+  let lastReported = 0;
+  const startedAt = Date.now();
+
+  const reportProgress = () => {
+    const elapsedSeconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+    console.log(
+      `Fetch progress: ${processed}/${urls.length} (${Math.round((processed / Math.max(urls.length, 1)) * 100)}%) ` +
+      `rows=${rows.length} skipped=${skipped.length} elapsed=${elapsedSeconds}s`
+    );
+  };
 
   const results = await parallelMap(
     urls,
     async (url) => {
       try {
-        return await fetchSingleEventRow(url, includeTagsColumn, strictUrlsMode);
+        const result = await fetchSingleEventRow(url, strictUrlsMode);
+        processed += 1;
+        if (result.row) rows.push(result.row);
+        if (result.skip) skipped.push(result.skip);
+        if (processed === urls.length || processed - lastReported >= 10) {
+          lastReported = processed;
+          reportProgress();
+        }
+        return result;
       } catch (err) {
-        return { skip: { url, reason: err.message } };
+        const result = { skip: { url, reason: err.message } };
+        processed += 1;
+        skipped.push(result.skip);
+        if (processed === urls.length || processed - lastReported >= 10) {
+          lastReported = processed;
+          reportProgress();
+        }
+        return result;
       }
     },
     concurrency
   );
-
-  for (const result of results) {
-    if (result.row) rows.push(result.row);
-    if (result.skip) skipped.push(result.skip);
-  }
 
   return { rows, skipped };
 }
@@ -431,7 +700,7 @@ async function closeMeetupFallback(fallback) {
   await fallback.browser.close();
 }
 
-async function fetchMeetupEventViaBrowser(url, includeTagsColumn) {
+async function fetchMeetupEventViaBrowser(url) {
   if (!globalMeetupFallback?.enabled) return null;
   const page = await globalMeetupFallback.context.newPage();
   try {
@@ -458,18 +727,11 @@ async function fetchMeetupEventViaBrowser(url, includeTagsColumn) {
     const title = event.title || null;
     if (!title || !event.dateTime || !eventUrl) return null;
 
-    const tags = inferEventTags(title, description);
-    const primary = inferTechCategory(title, description);
-    const normalizedTags = [primary, ...tags.filter((t) => t !== primary)].slice(0, 12);
-    if (!includeTagsColumn) {
-      throw new Error('Missing `tags` column on target table. Add tags text[] before running chibot.');
-    }
-
     return {
       title,
       start_datetime: event.dateTime,
       Online: String(event.eventType || '').toUpperCase().includes('ONLINE') ? 'TRUE' : 'FALSE',
-      tags: normalizedTags,
+      ...inferEventTaxonomy(title, description, [location, eventUrl, event.group?.name]),
       image_url: event.featuredEventPhoto?.source || event.displayPhoto?.source || null,
       eventUrl,
       location,
@@ -650,67 +912,106 @@ function normalizeLocation(location) {
   return cleanLocationString(raw);
 }
 
-function inferTechCategory(title, description) {
-  const tags = inferEventTags(title, description);
-  if (tags.includes('AI')) {
-    return 'AI';
-  }
-  if (tags.includes('Startup') || tags.includes('Founder') || tags.includes('Venture')) {
-    return 'Startup';
-  }
-  return 'Tech';
+function unique(values) {
+  return [...new Set(values.filter(Boolean))];
 }
 
-function inferEventTags(title, description) {
-  const hay = `${title || ''} ${description || ''}`.toLowerCase();
-  const tags = [];
-  const hasAny = (patterns) => patterns.some((re) => re.test(hay));
-  const rules = [
-    ['AI', [/\bai\b/, /\bartificial intelligence\b/, /\bllm(s)?\b/, /\bgenai\b/, /\bmachine learning\b/, /\bdeepmind\b/, /\bclaude\b/, /\bopenai\b/]],
-    ['Startup', [/\bstartup(s)?\b/, /\bstart-up(s)?\b/, /\bearly stage\b/, /\bincubator\b/, /\baccelerator\b/]],
-    ['Founder', [/\bfounder(s)?\b/, /\bcofounder(s)?\b/, /\bco-founder(s)?\b/, /\bentrepreneur(s)?\b/]],
-    ['Venture', [/\bvc\b/, /\bventure\b/, /\bangel investor(s)?\b/, /\bfundraising\b/, /\bpitch\b/]],
-    ['Hackathon', [/\bhackathon(s)?\b/, /\bbuildathon(s)?\b/]],
-    ['Developer', [/\bdeveloper(s)?\b/, /\bengineering\b/, /\bsoftware engineer(s)?\b/, /\bcoding\b/, /\bcode\b/]],
-    ['HealthTech', [/\bhealthtech\b/, /\bdigital health\b/, /\bhealthcare ai\b/]],
-    ['FinTech', [/\bfintech\b/, /\bcrypto\b/, /\bdefi\b/, /\bweb3\b/, /\bblockchain\b/]],
-    ['Data', [/\bdata science\b/, /\banalytics\b/, /\bdata engineer(s)?\b/, /\bdata\b/]],
-    ['Product', [/\bproduct manager(s)?\b/, /\bproduct\b/, /\bux\b/, /\bdesign\b/]],
-    ['Networking', [/\bmeetup(s)?\b/, /\bnetworking\b/, /\bcommunity\b/, /\bmixer\b/]],
-    ['Workshop', [/\bworkshop(s)?\b/, /\bmasterclass(es)?\b/, /\bbootcamp(s)?\b/]],
-    ['Panel', [/\bpanel(s)?\b/, /\bfireside chat\b/, /\broundtable(s)?\b/, /\bdiscussion(s)?\b/]]
-  ];
-
-  for (const [tag, patterns] of rules) {
-    if (hasAny(patterns)) tags.push(tag);
+function collectTaxonomy(text, rules) {
+  const found = [];
+  for (const [label, patterns] of rules) {
+    if (patterns.some((re) => re.test(text))) found.push(label);
   }
-
-  // Ensure we always have at least one useful umbrella tag.
-  if (!tags.includes('Tech')) tags.push('Tech');
-
-  // Deduplicate with stable order.
-  return [...new Set(tags)];
+  return unique(found);
 }
 
-function mapToRow(event, fallbackUrl, fallbackImage, includeTagsColumn) {
+function withoutNetworkingFallback(activity) {
+  if (activity.length <= 1) return activity;
+  return activity.filter((value) => value !== 'networking');
+}
+
+function inferEventTaxonomy(title, description, extras = []) {
+  const hay = [title || '', description || '', ...extras.filter(Boolean)].join(' ').toLowerCase();
+
+  const audience = collectTaxonomy(hay, [
+    ['invite-only', [/\binvite[- ]only\b/, /\bprivate dinner\b/, /\bregister to see address\b/]],
+    ['female founders', [/\bwomen in\b/, /\binternational women'?s day\b/, /\bfemale founder(s)?\b/]],
+    ['minority founders', [/\bminority founder(s)?\b/, /\bunderrepresented founder(s)?\b/]],
+    ['minority investors', [/\bminority investor(s)?\b/]],
+    ['founders', [/\bfounder(s)?\b/, /\bstartup\b/, /\bentrepreneur(s)?\b/]],
+    ['investors', [/\binvestor(s)?\b/, /\bventure\b/, /\bvc\b/, /\bangel\b/]],
+    ['service-providers', [/\badvisor(s)?\b/, /\bservice provider(s)?\b/, /\bconsultant(s)?\b/, /\blegal\b/, /\btax\b/]],
+    ['developers', [/\bdeveloper(s)?\b/, /\bcoding\b/, /\bengineer(s)?\b/, /\.net\b/, /\bdrupal\b/, /\bgrafana\b/, /\bsoftware\b/, /\btest(er|ing)\b/]],
+    ['all', [/\bcommunity\b/, /\bmeetup\b/, /\bnetworking\b/, /\bsocial\b/]]
+  ]);
+
+  const industry = collectTaxonomy(hay, [
+    ['AI', [/\bai\b/, /\bclaude\b/, /\banthropic\b/, /\bagent(s)?\b/, /\bllm(s)?\b/]],
+    ['climate tech', [/\bclimate\b/, /\bclean tech\b/, /\bclean energy\b/, /\bsustainab/i]],
+    ['health', [/\bhealth\b/, /\bhealthcare\b/, /\btherapy\b/, /\bmedical\b/]],
+    ['biotech', [/\bbiotech\b/]],
+    ['fintech', [/\bfintech\b/, /\bfinancial\b/, /\bfinra\b/, /\bbank(ing)?\b/, /\bpayments?\b/]],
+    ['crypto/Web3', [/\bcrypto\b/, /\bweb3\b/, /\bblockchain\b/, /\bdefi\b/]],
+    ['cybersecurity', [/\bsecurity\b/, /\bcyber\b/, /\bburbsec\b/]],
+    ['data', [/\bdata\b/, /\banalytics\b/, /\bstatistical\b/]],
+    ['insurtech', [/\binsurtech\b/, /\binsurance\b/]],
+    ['sports', [/\bsports?\b/, /\bcubs\b/]],
+    ['future of work', [/\bfuture of work\b/, /\bworkflow(s)?\b/, /\bcustomer success\b/]],
+    ['hardtech', [/\bhard tech\b/, /\bmhub\b/, /\binnovation summit\b/]],
+    ['legal tech', [/\blegal tech\b/, /\bintellectual property\b/]],
+    ['saas', [/\bsaas\b/]],
+    ['consumer', [/\bcustomer service\b/, /\bconsumer\b/]]
+  ]);
+
+  const topic = collectTaxonomy(hay, [
+    ['branding', [/\bbranding\b/]],
+    ['business strategy', [/\bstrategy\b/, /\bmarket\b/, /\bceo\b/, /\badoption\b/]],
+    ['capital deployment', [/\bventure\b/, /\bvc\b/, /\binvestor(s)?\b/]],
+    ['coding', [/\bcoding\b/, /\bbuild with\b/, /\.net\b/, /\bgrafana\b/, /\bdrupal\b/, /\bobservability\b/, /\bevals\b/, /\bsoftware\b/]],
+    ['finance', [/\bfinancial\b/, /\bfinra\b/, /\btax\b/]],
+    ['fundraising', [/\bfundraising\b/, /\bpitch\b/, /1 million cups/i]],
+    ['GTM', [/\bgtm\b/, /\bgo-to-market\b/]],
+    ['legal\/IP', [/\blegal\b/, /\bip\b/, /\bintellectual property\b/]],
+    ['marketing', [/\bmarketing\b/]],
+    ['organization management', [/\bleadership\b/, /\bcommunication\b/, /\bmanagement\b/]],
+    ['policy', [/\bpolicy\b/]],
+    ['product', [/\bproduct\b/, /\bux\b/, /\bui\b/, /\bcustomer success\b/]],
+    ['recruiting', [/\brecruit/i]],
+    ['sales', [/\bsales\b/]],
+    ['scaling', [/\bscale\b/, /\bmaturity\b/, /\bgrowth\b/]],
+    ['UIUX/CX', [/\bux\b/, /\bui\b/, /\bcx\b/]]
+  ]);
+
+  const activity = withoutNetworkingFallback(
+    collectTaxonomy(hay, [
+      ['co-working', [/\bcowork/i, /\bco-working\b/]],
+      ['discussion', [/\bdiscussion\b/, /\btherapy\b/, /\bmeeting\b/, /\broundtable\b/]],
+      ['hangout event', [/\bhangout\b/, /\bopen house\b/, /\bhappy hour\b/, /\bsocial\b/]],
+      ['networking', [/\bnetworking\b/, /\bmixer\b/, /\bconnect\b/, /\bmeetup\b/, /\bcommunity\b/]],
+      ['pitching or demo', [/\bpitch\b/, /\bdemo\b/, /1 million cups/i]],
+      ['speaker panel or fireside', [/\bpanel\b/, /\bfireside\b/, /\bsummit\b/, /\bq&a\b/]]
+    ])
+  );
+
+  return { audience, industry, topic, activity };
+}
+
+function mapToRow(event, fallbackUrl, fallbackImage) {
   const mode = String(event.eventAttendanceMode || '').toLowerCase();
   const online = mode.includes('online') ? 'TRUE' : 'FALSE';
-  const tags = inferEventTags(event.name, event.description);
-  const primary = inferTechCategory(event.name, event.description);
-  const normalizedTags = [primary, ...tags.filter((t) => t !== primary)].slice(0, 12);
   const row = {
     title: event.name || null,
     start_datetime: event.startDate || null,
     Online: online,
-    tags: normalizedTags,
+    ...inferEventTaxonomy(event.name, event.description, [
+      normalizeLocation(event.location),
+      event['@id'],
+      fallbackUrl
+    ]),
     image_url: Array.isArray(event.image) ? event.image[0] : event.image || fallbackImage,
     eventUrl: event['@id'] || fallbackUrl,
     location: normalizeLocation(event.location),
     google_maps_url: null
   };
-  if (!includeTagsColumn) {
-    throw new Error('Missing `tags` column on target table. Add tags text[] before running chibot.');
-  }
 
   return row;
 }
@@ -889,7 +1190,7 @@ const VENUE_OVERRIDES = {
 // Let's Do Fun Things — scrape their listing page for tech-relevant events.
 // They rarely have tech events, but when they do we want to catch them.
 // ---------------------------------------------------------------------------
-async function fetchLdftEvents(includeTagsColumn) {
+async function fetchLdftEvents() {
   const rows = [];
   try {
     const html = await fetchText('https://www.letsdofunthings.org/events');
@@ -917,15 +1218,11 @@ async function fetchLdftEvents(includeTagsColumn) {
         }
       }
 
-      const tags = inferEventTags(name, description);
-      const primary = inferTechCategory(name, description);
-      const normalizedTags = [primary, ...tags.filter((t) => t !== primary)].slice(0, 12);
-
       rows.push({
         title: name.trim(),
         start_datetime: startAt,
         Online: 'FALSE',
-        tags: normalizedTags,
+        ...inferEventTaxonomy(name, description, [location, eventUrl]),
         image_url: imageUrl || null,
         eventUrl,
         location,
@@ -1053,9 +1350,12 @@ async function findExistingEventUrls(supabase, table, eventUrls) {
   return existing;
 }
 
-async function hasTagsColumn(supabase, table) {
-  const { error } = await supabase.from(table).select('tags').limit(1);
-  return !error;
+async function hasTaxonomyColumns(supabase, table) {
+  for (const column of ['audience', 'industry', 'topic', 'activity']) {
+    const { error } = await supabase.from(table).select(column).limit(1);
+    if (error) return false;
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1070,7 +1370,7 @@ async function upsertEventRows(supabase, table, rows) {
   for (const part of chunk(eventUrls, 100)) {
     const { data, error } = await supabase
       .from(table)
-      .select('id,title,start_datetime,Online,tags,image_url,eventUrl,location')
+      .select('id,title,start_datetime,Online,audience,industry,topic,activity,image_url,eventUrl,location')
       .in('eventUrl', part);
     if (error) throw new Error(`Upsert lookup failed: ${error.message}`);
     for (const row of data || []) {
@@ -1095,7 +1395,10 @@ async function upsertEventRows(supabase, table, rows) {
       existing.Online !== row.Online ||
       existing.location !== row.location ||
       existing.image_url !== row.image_url ||
-      JSON.stringify(existing.tags) !== JSON.stringify(row.tags);
+      JSON.stringify(existing.audience) !== JSON.stringify(row.audience) ||
+      JSON.stringify(existing.industry) !== JSON.stringify(row.industry) ||
+      JSON.stringify(existing.topic) !== JSON.stringify(row.topic) ||
+      JSON.stringify(existing.activity) !== JSON.stringify(row.activity);
 
     if (changed) {
       toUpdate.push({ id: existing.id, ...row });
@@ -1125,6 +1428,8 @@ async function upsertEventRows(supabase, table, rows) {
 
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
+  const scrapeStartedAt = new Date();
+  resetHostRuntimePolicies(opts);
   const writeKey = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
   const table = process.env.SUPABASE_TABLE || 'beta_chiirl_events';
 
@@ -1140,6 +1445,9 @@ async function main() {
 
   try {
     let candidateUrls = [];
+    let seedPageCachePath = null;
+    let newSeedPagesDiscovered = 0;
+    let newlyMinedEventUrls = 0;
     if (opts.strictUrls && opts.urls.length > 0) {
       candidateUrls = [...new Set(opts.urls.map(canonicalizeUrl).filter(Boolean))];
       console.log(`Using strict URL mode with ${candidateUrls.length} candidate URLs.`);
@@ -1163,24 +1471,42 @@ async function main() {
       const orgUrls = extractOrgUrlsFromEventUrls(dbSeedEventUrls);
       console.log(`Derived ${orgUrls.length} unique org/group listing URLs from current DB events.`);
 
-      // Mine organizer/calendar pages from current Luma event pages only.
-      // Luma event URLs don't reveal the org, so we fetch current events to
-      // discover their calendar pages instead of reprocessing full history.
-      const seedPageUrls = new Set(orgUrls);
+      const seedPageCache = loadSeedPageCache();
+      const cachedSeedPages = new Set(seedPageCache.seed_pages || []);
+      const minedEventUrls = new Set(seedPageCache.mined_event_urls || []);
+      const seedPageUrls = new Set([...orgUrls, ...cachedSeedPages]);
       const lumaSeedUrls = dbSeedEventUrls.filter((u) => isLumaUrl(u));
-      console.log(`Mining ${lumaSeedUrls.length} current Luma event pages for org links...`);
+      const unminedLumaSeedUrls = lumaSeedUrls.filter((u) => !minedEventUrls.has(u));
+      console.log(
+        `Using ${cachedSeedPages.size} cached seed page(s). Mining ${unminedLumaSeedUrls.length} new Luma event page(s) for org links...`
+      );
       await parallelMap(
-        lumaSeedUrls,
+        unminedLumaSeedUrls,
         async (eventUrl) => {
           try {
             const html = await fetchText(eventUrl);
             const pages = extractSeedPagesFromHtml(html);
-            for (const p of pages) seedPageUrls.add(p);
+            newlyMinedEventUrls += 1;
+            for (const p of pages) {
+              if (!seedPageUrls.has(p)) {
+                seedPageUrls.add(p);
+                newSeedPagesDiscovered += 1;
+              }
+            }
           } catch {
             // Ignore individual failed event pages while mining seeds.
+          } finally {
+            minedEventUrls.add(eventUrl);
           }
         },
         opts.concurrency
+      );
+      seedPageCachePath = saveSeedPageCache({
+        seed_pages: [...seedPageUrls],
+        mined_event_urls: [...minedEventUrls]
+      });
+      console.log(
+        `Seed page cache updated: ${seedPageCachePath} (${seedPageUrls.size} seed page(s), ${minedEventUrls.size} mined Luma event(s), +${newSeedPagesDiscovered} new page(s)).`
       );
       console.log(`Total seed/org pages to expand: ${seedPageUrls.size}`);
 
@@ -1193,19 +1519,14 @@ async function main() {
       console.log(`Found ${candidateUrls.length} candidate URLs (city+current-db-seeds+orgs).`);
     }
 
-    const includeTagsColumn = await hasTagsColumn(supabase, table);
-    if (!includeTagsColumn) throw new Error('Missing `tags` column on target table.');
+    const includeTaxonomyColumns = await hasTaxonomyColumns(supabase, table);
+    if (!includeTaxonomyColumns) throw new Error('Missing taxonomy columns on target table.');
 
-    const { rows: hydratedRows, skipped } = await fetchEventRows(
-      candidateUrls,
-      includeTagsColumn,
-      opts.strictUrls,
-      opts.concurrency
-    );
+    const { rows: hydratedRows, skipped } = await fetchEventRows(candidateUrls, opts.strictUrls, opts.concurrency);
 
     // Scrape Let's Do Fun Things for tech-relevant events.
     if (!opts.strictUrls) {
-      const ldftRows = await fetchLdftEvents(includeTagsColumn);
+      const ldftRows = await fetchLdftEvents();
       if (ldftRows.length > 0) {
         console.log(`Let's Do Fun Things: found ${ldftRows.length} tech-relevant event(s).`);
         hydratedRows.push(...ldftRows);
@@ -1239,6 +1560,31 @@ async function main() {
       return true;
     });
 
+    const baseDump = {
+      scraped_at: scrapeStartedAt.toISOString(),
+      finished_at: new Date().toISOString(),
+      dry_run: opts.dryRun,
+      strict_urls_mode: opts.strictUrls,
+      city: opts.city,
+      concurrency: opts.concurrency,
+      host_policies: {
+        luma: getHostPolicy('luma.com'),
+        meetup: getHostPolicy('www.meetup.com'),
+        eventbrite: getHostPolicy('www.eventbrite.com')
+      },
+      host_stats: Object.fromEntries(_hostStats.entries()),
+      seed_page_cache_path: seedPageCachePath,
+      newly_mined_event_url_count: newlyMinedEventUrls,
+      new_seed_page_count: newSeedPagesDiscovered,
+      candidate_url_count: candidateUrls.length,
+      candidate_urls: candidateUrls,
+      hydrated_row_count: hydratedRows.length,
+      normalized_row_count: normalizedRows.length,
+      skipped_count: skipped.length,
+      skipped,
+      rows: normalizedRows
+    };
+
     if (opts.dryRun) {
       // In dry-run mode, still check against DB to show what WOULD be new.
       const existing = await findExistingEventUrls(
@@ -1248,16 +1594,30 @@ async function main() {
       );
       const newRows = normalizedRows.filter((r) => !existing.has(r.eventUrl));
       const existingRows = normalizedRows.filter((r) => existing.has(r.eventUrl));
+      const dumpPath = writeScrapeDump({
+        ...baseDump,
+        existing_row_count: existingRows.length,
+        new_row_count: newRows.length,
+        new_rows: newRows,
+        existing_rows: existingRows.map((row) => row.eventUrl)
+      });
 
       console.log(`\n--- DRY RUN RESULTS ---`);
       console.log(`Total relevant events scraped: ${normalizedRows.length}`);
       console.log(`Already in DB: ${existingRows.length}`);
       console.log(`NEW events that would be added: ${newRows.length}`);
+      console.log(`Scrape dump written: ${dumpPath}`);
 
       if (newRows.length > 0) {
         console.log('\nNew events:');
         newRows.forEach((row) => {
-          console.log(`  + ${row.start_datetime} | ${(row.tags || []).join(',')} | ${row.title}`);
+          const summary = [
+            `audience=${(row.audience || []).join('|') || '-'}`,
+            `industry=${(row.industry || []).join('|') || '-'}`,
+            `topic=${(row.topic || []).join('|') || '-'}`,
+            `activity=${(row.activity || []).join('|') || '-'}`
+          ].join(' ');
+          console.log(`  + ${row.start_datetime} | ${summary} | ${row.title}`);
           console.log(`    ${row.eventUrl}`);
         });
       }
@@ -1269,7 +1629,12 @@ async function main() {
 
     // Use upsert to insert new and update changed events.
     const stats = await upsertEventRows(supabase, table, normalizedRows);
+    const dumpPath = writeScrapeDump({
+      ...baseDump,
+      upsert_stats: stats
+    });
     console.log(`\nUpsert complete: ${stats.inserted} inserted, ${stats.updated} updated, ${stats.unchanged} unchanged.`);
+    console.log(`Scrape dump written: ${dumpPath}`);
   } finally {
     await closeMeetupFallback(globalMeetupFallback);
     globalMeetupFallback = null;

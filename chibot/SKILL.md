@@ -74,13 +74,17 @@ npm run meetup:login -- --email <your_email>
   - `title`
   - `start_datetime`
   - `Online`
-  - `tags` (`text[]`)
+  - `audience` (`text[]`)
+  - `industry` (`text[]`)
+  - `topic` (`text[]`)
+  - `activity` (`text[]`)
   - `image_url`
   - `eventUrl`
   - `location`
   - `google_maps_url`
 - Skips rows lacking required fields (`title`, `start_datetime`, `eventUrl`).
 - Avoids duplicates by checking existing `eventUrl` values before insert.
+- Writes taxonomy during ingest; `scripts/backfill-event-taxonomy.js` remains a repair tool for older rows, not a required second step for fresh scrapes.
 
 ## If Insert Fails
 
