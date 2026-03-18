@@ -131,3 +131,53 @@ Both produced valid event rows with `title`, `start_datetime`, `tags`, `eventUrl
 ### Data cleanup
 - Found and removed duplicate `Founder’s Therapy - Coffee Roundtable` row in `beta_chiirl_events`.
 - Kept canonical Meetup URL row and preserved fuller location details.
+
+## Taxonomy Migration + Prototype Filters (March 18, 2026)
+
+### Taxonomy decision
+- Moved away from the old single flat `tags` filter model for the prototype.
+- Adopted four structured taxonomy fields for listings:
+  - `audience`
+  - `industry`
+  - `topic`
+  - `activity`
+- Explicitly dropped `stage` from the current prototype because the source data does not support it reliably.
+- Kept taxonomy values multi-select.
+- Treated `networking` as fallback-only for `activity` when no stronger activity is present.
+
+### Database changes
+- Added new taxonomy columns to `public.beta_chiirl_events`:
+  - `audience text[]`
+  - `industry text[]`
+  - `topic text[]`
+  - `activity text[]`
+- Added helper SQL file:
+  - `sql/add_event_taxonomy_columns.sql`
+- Backfilled taxonomy onto all current rows in `beta_chiirl_events` using:
+  - `scripts/backfill-event-taxonomy.js`
+- Added proposal/exploration helper:
+  - `scripts/propose-event-taxonomy.js`
+
+### Prototype UI changes
+- Replaced old tag-link filtering on `/` with dropdown filters for:
+  - `audience`
+  - `industry`
+  - `topic`
+  - `activity`
+  - `mode`
+- Event cards now display the structured taxonomy values instead of relying on old tag labels for filtering.
+- Filtering on the `Events` tab is now client-side:
+  - the full upcoming event list is rendered once
+  - dropdown changes re-filter rows in the browser without a server round trip
+  - URL query params are kept in sync via `history.replaceState`
+
+### Dropdown behavior
+- Removed explicit `all` from the `Audience` filter options.
+- `All audiences` is now only the blank/default dropdown state.
+- Dropdown options show event counts, for example `AI (24)` or `founders (45)`.
+- Zero-result dropdown options are hidden unless currently selected.
+
+### Current caveats
+- Taxonomy is rule-based and still has some noisy classifications in edge cases.
+- Example: some events may still pick up overlapping `activity` values such as `discussion` plus `speaker panel or fireside`.
+- Next cleanup pass should tighten heuristics now that the UI and DB shape are in place.

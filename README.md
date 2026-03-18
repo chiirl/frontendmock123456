@@ -110,6 +110,12 @@ Dev mode:
 npm run dev
 ```
 
+Background dev watcher:
+
+```bash
+npm run dev:up
+```
+
 ## Auth + Profiles
 
 The Express app now includes a minimal Supabase Auth flow for CHIIRL:
@@ -165,6 +171,24 @@ When CHIIRL sends the email, it sets `redirectTo` to `http://localhost:3000/auth
 - `google_maps_url`
 
 It de-duplicates by existing `eventUrl` values before insert.
+
+The current prototype also uses structured taxonomy columns on `beta_chiirl_events`:
+- `audience text[]`
+- `industry text[]`
+- `topic text[]`
+- `activity text[]`
+
+Those fields are currently backfilled by rule-based scripts:
+- `sql/add_event_taxonomy_columns.sql`
+- `scripts/backfill-event-taxonomy.js`
+- `scripts/propose-event-taxonomy.js`
+
+Current UI behavior on `/`:
+- event filtering is client-side for the `Events` tab
+- filters are dropdowns for `audience`, `industry`, `topic`, `activity`, and `mode`
+- dropdown option counts update live based on the current filter context
+- zero-result dropdown options are hidden unless already selected
+- `networking` is treated as a fallback activity, not a co-equal activity when a stronger activity exists
 
 ## Troubleshooting
 

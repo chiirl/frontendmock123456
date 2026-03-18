@@ -75,38 +75,83 @@ function renderThemeStyles() {
     .tabs a.active { background: #1d6f93; color: #fff; border-color: #1d6f93; }
     .tabs a:visited { color: #fff; }
     .tabs a.active:visited { color: #fff; }
-    .filters a { display: inline-block; padding: 2px 8px; margin: 2px; font-size: 12px; text-decoration: none; border: 1px solid #1d6f93; color: #fff; background: #41b6e6; }
-    .filters a.active { background: #1d6f93; color: #fff; border-color: #1d6f93; }
-    .filters a:visited { color: #fff; }
-    .filters a.active:visited { color: #fff; }
+    .filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; align-items: end; background: #fff; border: 1px solid #bbb; padding: 10px; }
+    .filters label { display: block; font-size: 12px; font-weight: bold; margin-bottom: 4px; }
+    .filters select { width: 100%; box-sizing: border-box; padding: 6px; border: 1px solid #999; background: #fff; }
+    .filters .filter-actions { display: flex; gap: 8px; align-items: center; }
+    .filters .clear-link { font-size: 12px; }
     .calendar-head a { text-decoration: none; border: 1px solid #1d6f93; background: #41b6e6; color: #fff; padding: 2px 8px; font-size: 12px; }
     .day-today { outline: 2px solid #41b6e6; outline-offset: -2px; }
   `;
 }
 
-function getEventTags(event) {
-  if (!event) return [];
-
+function getArrayValues(value) {
   const clean = (x) => String(x || '').trim();
   const uniq = (arr) => [...new Set(arr.map(clean).filter(Boolean))];
-
-  if (Array.isArray(event.tags)) return uniq(event.tags);
-
-  if (typeof event.tags === 'string' && event.tags.trim()) {
+  if (Array.isArray(value)) return uniq(value);
+  if (typeof value === 'string' && value.trim()) {
     try {
-      const parsed = JSON.parse(event.tags);
+      const parsed = JSON.parse(value);
       if (Array.isArray(parsed)) return uniq(parsed);
     } catch {
       // fall through to delimiter parsing
     }
-    return uniq(event.tags.split(/[|,]/));
+    return uniq(value.split(/[|,]/));
+  }
+  return [];
+}
+
+function getEventTags(event) {
+  if (!event) return [];
+  if (Array.isArray(event.tags) || (typeof event.tags === 'string' && event.tags.trim())) {
+    return getArrayValues(event.tags);
   }
 
   if (typeof event.tech_category === 'string' && event.tech_category.trim()) {
-    return uniq(event.tech_category.split('|'));
+    return getArrayValues(event.tech_category);
   }
 
   return [];
+}
+
+function getEventTaxonomyValues(event, key) {
+  return getArrayValues(event?.[key]);
+}
+
+function buildTaxonomyOptions(events, key) {
+  return [...new Set(events.flatMap((event) => getEventTaxonomyValues(event, key)))].sort();
+}
+
+function buildFilterOptions(events, key) {
+  const options = buildTaxonomyOptions(events, key);
+  if (key === 'audience') {
+    return options.filter((value) => normalizeFilterValue(value) !== 'all');
+  }
+  return options;
+}
+
+function renderTaxonomyList(event) {
+  const fields = [
+    ['Audience', getEventTaxonomyValues(event, 'audience')],
+    ['Industry', getEventTaxonomyValues(event, 'industry')],
+    ['Topic', getEventTaxonomyValues(event, 'topic')],
+    ['Activity', getEventTaxonomyValues(event, 'activity')]
+  ].filter(([, values]) => values.length > 0);
+
+  if (fields.length === 0) return '';
+  return fields
+    .map(([label, values]) => `<span class="tag"><strong>${label}:</strong> ${escapeHtml(values.join(', '))}</span>`)
+    .join('<br>');
+}
+
+function normalizeFilterValue(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function encodeFilterValues(values) {
+  return getArrayValues(values)
+    .map(normalizeFilterValue)
+    .join('|');
 }
 
 function parseEventDate(raw) {
@@ -677,6 +722,11 @@ app.get('/', async (req, res) => {
   const auth = await getSessionContext(req, res);
   const view = getView(req);
   const monthParam = String(req.query.month || '');
+  const audienceFilter = String(req.query.audience || '');
+  const industryFilter = String(req.query.industry || '');
+  const topicFilter = String(req.query.topic || '');
+  const activityFilter = String(req.query.activity || '');
+  const modeFilter = String(req.query.mode || '');
   const { data: events, error } = await supabase
     .from(EVENTS_TABLE_NAME)
     .select('*')
@@ -704,22 +754,20 @@ app.get('/', async (req, res) => {
     return true;
   });
 
-  const tagFilter = req.query.tag || req.query.category || '';
-  const modeFilter = req.query.mode || '';
-  const filtered = deduped.filter(e => {
-    if (tagFilter) {
-      const tags = getEventTags(e);
-      if (!tags.includes(tagFilter)) return false;
-    }
-    if (modeFilter === 'online' && e.Online !== 'TRUE') return false;
-    if (modeFilter === 'irl' && e.Online === 'TRUE') return false;
-    return true;
-  });
-
-  const tags = [...new Set(deduped.flatMap(getEventTags))].sort();
+  const audienceOptions = buildFilterOptions(deduped, 'audience');
+  const industryOptions = buildFilterOptions(deduped, 'industry');
+  const topicOptions = buildFilterOptions(deduped, 'topic');
+  const activityOptions = buildFilterOptions(deduped, 'activity');
   const emailDraft = buildEmailDraft(allDeduped);
   const emailDraftHtml = buildEmailDraftHtml(allDeduped);
   const calendar = buildCalendarModel(allDeduped, monthParam);
+  const currentFilters = {
+    audience: audienceFilter,
+    industry: industryFilter,
+    topic: topicFilter,
+    activity: activityFilter,
+    mode: modeFilter
+  };
 
   const html = `<!DOCTYPE html>
 <html lang="en">
@@ -761,21 +809,62 @@ app.get('/', async (req, res) => {
   <h1>Chicago In Real Life | The Top Tech & Startup Events</h1>
   ${renderAuthLinks(auth)}
   <div class="tabs">
-    <a href="${buildUrl('/', { tag: tagFilter, mode: modeFilter })}"${view === 'events' ? ' class="active"' : ''}>Events</a>
-    <a href="${buildUrl('/', { view: 'email' })}"${view === 'email' ? ' class="active"' : ''}>Email Draft</a>
-    <a href="${buildUrl('/', { view: 'calendar', month: calendar.monthParam })}"${view === 'calendar' ? ' class="active"' : ''}>Calendar</a>
+    <a href="${buildUrl('/', currentFilters)}"${view === 'events' ? ' class="active"' : ''}>Events</a>
+    <a href="${buildUrl('/', { view: 'email', ...currentFilters })}"${view === 'email' ? ' class="active"' : ''}>Email Draft</a>
+    <a href="${buildUrl('/', { view: 'calendar', month: calendar.monthParam, ...currentFilters })}"${view === 'calendar' ? ' class="active"' : ''}>Calendar</a>
   </div>
   <p><a href="${buildUrl('/archive')}">archive</a> | <a href="${buildUrl('/raw')}">raw table</a></p>
-  ${view === 'events' ? `<div class="filters">
-    <a href="${buildUrl('/')}"${!tagFilter && !modeFilter ? ' class="active"' : ''}>All</a>
-    <a href="${buildUrl('/', { mode: 'irl', tag: tagFilter })}"${modeFilter === 'irl' ? ' class="active"' : ''}>IRL</a>
-    <a href="${buildUrl('/', { mode: 'online', tag: tagFilter })}"${modeFilter === 'online' ? ' class="active"' : ''}>Online</a>
-    |
-    ${tags.map(t => `<a href="${buildUrl('/', { tag: t, mode: modeFilter })}"${tagFilter === t ? ' class="active"' : ''}>${t}</a>`).join('')}
-  </div>` : view === 'email' ? `<div class="subtools"><a href="${buildUrl('/email.txt')}">plain text route</a> <button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('email-draft').innerText)">copy</button></div>` : ''}
-  ${view === 'events' ? `<ul>
-    ${filtered.map(e => `
-      <li>
+  ${view === 'events' ? `<form class="filters" id="event-filters" method="get" action="/">
+    <input type="hidden" name="view" value="events">
+    <div>
+      <label for="audience">Audience</label>
+      <select id="audience" name="audience">
+        <option value="">All audiences</option>
+        ${audienceOptions.map((value) => `<option value="${escapeHtml(value)}" data-base-label="${escapeHtml(value)}"${audienceFilter === value ? ' selected' : ''}>${escapeHtml(value)}</option>`).join('')}
+      </select>
+    </div>
+    <div>
+      <label for="industry">Industry</label>
+      <select id="industry" name="industry">
+        <option value="">All industries</option>
+        ${industryOptions.map((value) => `<option value="${escapeHtml(value)}" data-base-label="${escapeHtml(value)}"${industryFilter === value ? ' selected' : ''}>${escapeHtml(value)}</option>`).join('')}
+      </select>
+    </div>
+    <div>
+      <label for="topic">Topic</label>
+      <select id="topic" name="topic">
+        <option value="">All topics</option>
+        ${topicOptions.map((value) => `<option value="${escapeHtml(value)}" data-base-label="${escapeHtml(value)}"${topicFilter === value ? ' selected' : ''}>${escapeHtml(value)}</option>`).join('')}
+      </select>
+    </div>
+    <div>
+      <label for="activity">Activity</label>
+      <select id="activity" name="activity">
+        <option value="">All activities</option>
+        ${activityOptions.map((value) => `<option value="${escapeHtml(value)}" data-base-label="${escapeHtml(value)}"${activityFilter === value ? ' selected' : ''}>${escapeHtml(value)}</option>`).join('')}
+      </select>
+    </div>
+    <div>
+      <label for="mode">Mode</label>
+      <select id="mode" name="mode">
+        <option value="">All modes</option>
+        <option value="irl"${modeFilter === 'irl' ? ' selected' : ''}>IRL</option>
+        <option value="online"${modeFilter === 'online' ? ' selected' : ''}>Online</option>
+      </select>
+    </div>
+    <div class="filter-actions">
+      <a class="clear-link" href="${buildUrl('/')}">Clear</a>
+    </div>
+  </form>` : view === 'email' ? `<div class="subtools"><a href="${buildUrl('/email.txt')}">plain text route</a> <button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('email-draft').innerText)">copy</button></div>` : ''}
+  ${view === 'events' ? `<ul id="event-list">
+    ${deduped.map(e => `
+      <li
+        data-audience="${escapeHtml(encodeFilterValues(e.audience))}"
+        data-industry="${escapeHtml(encodeFilterValues(e.industry))}"
+        data-topic="${escapeHtml(encodeFilterValues(e.topic))}"
+        data-activity="${escapeHtml(encodeFilterValues(e.activity))}"
+        data-mode="${escapeHtml(e.Online === 'TRUE' ? 'online' : 'irl')}"
+      >
         ${e.image_url ? `<img src="${e.image_url}" alt="">` : ''}
         <div><a href="${e.eventUrl || '#'}">${e.title}</a>
         <span class="tag">(${e.Online === 'TRUE' ? 'Online' : 'IRL'})</span><br>
@@ -783,10 +872,100 @@ app.get('/', async (req, res) => {
         <span class="loc">${e.location || ''}</span>
         ${e.google_maps_url && e.Online !== 'TRUE' ? ` - <a href="${e.google_maps_url}">map</a>` : ''}
         - <a href="${buildUrl('/event', { title: e.title, date: e.start_datetime || '' })}">raw</a>
+        ${renderTaxonomyList(e) ? `<br>${renderTaxonomyList(e)}` : ''}
         </div>
       </li>
     `).join('')}
-  </ul>` : view === 'email' ? `<pre id="email-draft" class="email-draft">${emailDraftHtml}</pre>` : `
+  </ul>
+  <script>
+    (function () {
+      var form = document.getElementById('event-filters');
+      var list = document.getElementById('event-list');
+      if (!form || !list) return;
+
+      var keys = ['audience', 'industry', 'topic', 'activity', 'mode'];
+      var rows = Array.prototype.slice.call(list.querySelectorAll('li'));
+
+      function matches(rowValue, selectedValue) {
+        if (!selectedValue) return true;
+        return String(rowValue || '').split('|').includes(selectedValue);
+      }
+
+      function rowMatchesFilters(row, values, skipKey) {
+        return (!values.audience || skipKey === 'audience' || matches(row.dataset.audience, values.audience)) &&
+          (!values.industry || skipKey === 'industry' || matches(row.dataset.industry, values.industry)) &&
+          (!values.topic || skipKey === 'topic' || matches(row.dataset.topic, values.topic)) &&
+          (!values.activity || skipKey === 'activity' || matches(row.dataset.activity, values.activity)) &&
+          (!values.mode || skipKey === 'mode' || matches(row.dataset.mode, values.mode));
+      }
+
+      function getRowValues(row, key) {
+        return String(row.dataset[key] || '').split('|').filter(Boolean);
+      }
+
+      function updateOptions(values) {
+        keys.forEach(function (key) {
+          var control = form.elements[key];
+          if (!control) return;
+
+          var counts = {};
+          rows.forEach(function (row) {
+            if (!rowMatchesFilters(row, values, key)) return;
+            getRowValues(row, key).forEach(function (value) {
+              counts[value] = (counts[value] || 0) + 1;
+            });
+          });
+
+          Array.prototype.forEach.call(control.options, function (option) {
+            if (!option.value) return;
+            var baseLabel = option.getAttribute('data-base-label') || option.value;
+            var count = counts[option.value] || 0;
+            option.textContent = count > 0 ? (baseLabel + ' (' + count + ')') : baseLabel;
+            option.hidden = count === 0 && option.value !== values[key];
+          });
+        });
+      }
+
+      function syncUrl(values) {
+        var params = new URLSearchParams(window.location.search);
+        params.set('view', 'events');
+        keys.forEach(function (key) {
+          if (values[key]) params.set(key, values[key]);
+          else params.delete(key);
+        });
+        var query = params.toString();
+        window.history.replaceState({}, '', query ? ('/?' + query) : '/');
+      }
+
+      function applyFilters() {
+        var values = {};
+        keys.forEach(function (key) {
+          var control = form.elements[key];
+          values[key] = control ? String(control.value || '').trim().toLowerCase() : '';
+        });
+
+        rows.forEach(function (row) {
+          var visible = rowMatchesFilters(row, values);
+          row.style.display = visible ? '' : 'none';
+        });
+
+        updateOptions(values);
+        syncUrl(values);
+      }
+
+      keys.forEach(function (key) {
+        var control = form.elements[key];
+        if (control) control.addEventListener('change', applyFilters);
+      });
+
+      form.addEventListener('submit', function (event) {
+        event.preventDefault();
+        applyFilters();
+      });
+
+      applyFilters();
+    })();
+  </script>` : view === 'email' ? `<pre id="email-draft" class="email-draft">${emailDraftHtml}</pre>` : `
   <div class="calendar-wrap">
     <div class="calendar-head">
       <a href="${buildUrl('/', { view: 'calendar', month: calendar.prevMonthParam })}">&larr; Prev</a>
