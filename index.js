@@ -800,10 +800,10 @@ app.get('/', async (req, res) => {
     .loc { color: #888; font-size: 12px; }
     .tag { font-size: 11px; color: #555; }
     .tabs { margin-bottom: 10px; max-width: 800px; }
-    .filter-toolbar { display: flex; flex-wrap: wrap; gap: 0; max-width: 800px; margin-bottom: 6px; position: relative; }
+    .filter-toolbar { display: flex; flex-wrap: wrap; gap: 0; max-width: 800px; margin-bottom: 6px; position: relative; overflow: visible; }
     .filter-btn, .clear-btn { appearance: none; border: 1px solid #1d6f93; background: #41b6e6; color: #fff; padding: 4px 10px; font: inherit; font-size: 12px; cursor: pointer; }
     .filter-btn.active { background: #1d6f93; color: #fff; }
-    .filter-panel { display: none; position: absolute; left: 0; top: calc(100% + 6px); width: min(360px, calc(100vw - 20px)); max-height: 60vh; overflow: auto; background: #fff; border: 1px solid #bbb; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12); padding: 10px; z-index: 20; }
+    .filter-panel { display: none; position: absolute; left: 0; top: calc(100% + 6px); width: min(320px, calc(100vw - 20px)); max-width: calc(100vw - 20px); box-sizing: border-box; max-height: 60vh; overflow: auto; background: #fff; border: 1px solid #bbb; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12); padding: 10px; z-index: 20; }
     .filter-panel.open { display: block; }
     .filter-option { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; border-bottom: 1px solid #eee; }
     .filter-option:last-child { border-bottom: 0; }
@@ -815,7 +815,7 @@ app.get('/', async (req, res) => {
     @media (max-width: 640px) {
       .filter-toolbar { gap: 0; }
       .filter-btn, .clear-btn { flex: 1 1 calc(50% - 6px); min-height: 34px; }
-      .filter-panel { width: calc(100vw - 20px); max-height: 70vh; }
+      .filter-panel { left: 0; right: 0; width: auto; min-width: 0; max-width: calc(100vw - 20px); max-height: 70vh; }
     }
     pre.email-draft { max-width: 900px; white-space: pre-wrap; background: #fff; border: 1px solid #bbb; padding: 10px; font-family: "Courier New", monospace; line-height: 1.4; }
     .subtools { margin-bottom: 10px; max-width: 900px; font-size: 12px; }
@@ -960,7 +960,21 @@ app.get('/', async (req, res) => {
             var countEl = option.querySelector('.filter-count');
             if (countEl) countEl.textContent = count > 0 ? String(count) : '';
             option.style.display = count === 0 && !values[key].includes(optionValue) ? 'none' : '';
+            option.setAttribute('data-count', String(count));
           });
+
+          Array.prototype.slice.call(panel.querySelectorAll('.filter-option'))
+            .sort(function (a, b) {
+              var countA = Number(a.getAttribute('data-count') || '0');
+              var countB = Number(b.getAttribute('data-count') || '0');
+              if (countB !== countA) return countB - countA;
+              var labelA = String(a.getAttribute('data-option') || '').toLowerCase();
+              var labelB = String(b.getAttribute('data-option') || '').toLowerCase();
+              return labelA.localeCompare(labelB);
+            })
+            .forEach(function (option) {
+              panel.appendChild(option);
+            });
         });
         return categoryTotals;
       }
