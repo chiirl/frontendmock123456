@@ -34,6 +34,11 @@ function getView(req) {
 function buildUrl(path, params = {}) {
   const query = new URLSearchParams();
   Object.entries(params).forEach(([k, v]) => {
+    if (Array.isArray(v)) {
+      const joined = v.map((item) => String(item || '').trim()).filter(Boolean).join(',');
+      if (joined) query.set(k, joined);
+      return;
+    }
     if (v != null && v !== '') query.set(k, v);
   });
   const qs = query.toString();
@@ -116,6 +121,15 @@ function getEventTags(event) {
 
 function getEventTaxonomyValues(event, key) {
   return getArrayValues(event?.[key]);
+}
+
+function parseFilterList(value) {
+  if (Array.isArray(value)) return [...new Set(value.flatMap(parseFilterList))];
+  return [...new Set(String(value || '').split(',').map((item) => item.trim()).filter(Boolean))];
+}
+
+function serializeFilterList(values) {
+  return parseFilterList(values).join(',');
 }
 
 function buildTaxonomyOptions(events, key) {
@@ -722,11 +736,11 @@ app.get('/', async (req, res) => {
   const auth = await getSessionContext(req, res);
   const view = getView(req);
   const monthParam = String(req.query.month || '');
-  const audienceFilter = String(req.query.audience || '');
-  const industryFilter = String(req.query.industry || '');
-  const topicFilter = String(req.query.topic || '');
-  const activityFilter = String(req.query.activity || '');
-  const modeFilter = String(req.query.mode || '');
+  const audienceFilter = parseFilterList(req.query.audience);
+  const industryFilter = parseFilterList(req.query.industry);
+  const topicFilter = parseFilterList(req.query.topic);
+  const activityFilter = parseFilterList(req.query.activity);
+  const modeFilter = parseFilterList(req.query.mode);
   const { data: events, error } = await supabase
     .from(EVENTS_TABLE_NAME)
     .select('*')
@@ -762,11 +776,11 @@ app.get('/', async (req, res) => {
   const emailDraftHtml = buildEmailDraftHtml(allDeduped);
   const calendar = buildCalendarModel(allDeduped, monthParam);
   const currentFilters = {
-    audience: audienceFilter,
-    industry: industryFilter,
-    topic: topicFilter,
-    activity: activityFilter,
-    mode: modeFilter
+    audience: serializeFilterList(audienceFilter),
+    industry: serializeFilterList(industryFilter),
+    topic: serializeFilterList(topicFilter),
+    activity: serializeFilterList(activityFilter),
+    mode: serializeFilterList(modeFilter)
   };
 
   const html = `<!DOCTYPE html>
@@ -786,7 +800,23 @@ app.get('/', async (req, res) => {
     .loc { color: #888; font-size: 12px; }
     .tag { font-size: 11px; color: #555; }
     .tabs { margin-bottom: 10px; max-width: 800px; }
-    .filters { margin-bottom: 10px; max-width: 800px; }
+    .filter-toolbar { display: flex; flex-wrap: wrap; gap: 0; max-width: 800px; margin-bottom: 6px; position: relative; }
+    .filter-btn, .clear-btn { appearance: none; border: 1px solid #1d6f93; background: #41b6e6; color: #fff; padding: 4px 10px; font: inherit; font-size: 12px; cursor: pointer; }
+    .filter-btn.active { background: #1d6f93; color: #fff; }
+    .filter-panel { display: none; position: absolute; left: 0; top: calc(100% + 6px); width: min(360px, calc(100vw - 20px)); max-height: 60vh; overflow: auto; background: #fff; border: 1px solid #bbb; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12); padding: 10px; z-index: 20; }
+    .filter-panel.open { display: block; }
+    .filter-option { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; border-bottom: 1px solid #eee; }
+    .filter-option:last-child { border-bottom: 0; }
+    .filter-option label { display: flex; gap: 8px; align-items: center; cursor: pointer; flex: 1; }
+    .filter-count { color: #666; font-size: 12px; white-space: nowrap; }
+    .active-chips { display: flex; flex-wrap: wrap; gap: 6px; max-width: 800px; margin: 0 0 10px; }
+    .chip { appearance: none; border: 1px solid #1d6f93; background: #fff; color: #1d6f93; padding: 4px 8px; font: inherit; font-size: 12px; cursor: pointer; }
+    .results-count { max-width: 800px; margin: 0 0 8px; color: #666; font-size: 12px; }
+    @media (max-width: 640px) {
+      .filter-toolbar { gap: 0; }
+      .filter-btn, .clear-btn { flex: 1 1 calc(50% - 6px); min-height: 34px; }
+      .filter-panel { width: calc(100vw - 20px); max-height: 70vh; }
+    }
     pre.email-draft { max-width: 900px; white-space: pre-wrap; background: #fff; border: 1px solid #bbb; padding: 10px; font-family: "Courier New", monospace; line-height: 1.4; }
     .subtools { margin-bottom: 10px; max-width: 900px; font-size: 12px; }
     .copy-btn { font-size: 12px; padding: 2px 8px; }
@@ -814,49 +844,32 @@ app.get('/', async (req, res) => {
     <a href="${buildUrl('/', { view: 'calendar', month: calendar.monthParam, ...currentFilters })}"${view === 'calendar' ? ' class="active"' : ''}>Calendar</a>
   </div>
   <p><a href="${buildUrl('/archive')}">archive</a> | <a href="${buildUrl('/raw')}">raw table</a></p>
-  ${view === 'events' ? `<form class="filters" id="event-filters" method="get" action="/">
-    <input type="hidden" name="view" value="events">
-    <div>
-      <label for="audience">Audience</label>
-      <select id="audience" name="audience">
-        <option value="">All audiences</option>
-        ${audienceOptions.map((value) => `<option value="${escapeHtml(value)}" data-base-label="${escapeHtml(value)}"${audienceFilter === value ? ' selected' : ''}>${escapeHtml(value)}</option>`).join('')}
-      </select>
+  ${view === 'events' ? `<div class="filter-toolbar" id="filter-toolbar">
+    <button class="filter-btn" type="button" data-filter-button="audience">Audience ▼</button>
+    <button class="filter-btn" type="button" data-filter-button="industry">Industry ▼</button>
+    <button class="filter-btn" type="button" data-filter-button="topic">Topic ▼</button>
+    <button class="filter-btn" type="button" data-filter-button="activity">Activity ▼</button>
+    <button class="filter-btn" type="button" data-filter-button="mode">Mode ▼</button>
+    <button class="clear-btn" type="button" id="clear-filters">Clear</button>
+    <div class="filter-panel" data-filter-panel="audience">
+      ${audienceOptions.map((value) => `<div class="filter-option" data-option="${escapeHtml(value)}"><label><input type="checkbox" data-filter-key="audience" value="${escapeHtml(value)}"${audienceFilter.includes(value) ? ' checked' : ''}> <span>${escapeHtml(value)}</span></label><span class="filter-count"></span></div>`).join('')}
     </div>
-    <div>
-      <label for="industry">Industry</label>
-      <select id="industry" name="industry">
-        <option value="">All industries</option>
-        ${industryOptions.map((value) => `<option value="${escapeHtml(value)}" data-base-label="${escapeHtml(value)}"${industryFilter === value ? ' selected' : ''}>${escapeHtml(value)}</option>`).join('')}
-      </select>
+    <div class="filter-panel" data-filter-panel="industry">
+      ${industryOptions.map((value) => `<div class="filter-option" data-option="${escapeHtml(value)}"><label><input type="checkbox" data-filter-key="industry" value="${escapeHtml(value)}"${industryFilter.includes(value) ? ' checked' : ''}> <span>${escapeHtml(value)}</span></label><span class="filter-count"></span></div>`).join('')}
     </div>
-    <div>
-      <label for="topic">Topic</label>
-      <select id="topic" name="topic">
-        <option value="">All topics</option>
-        ${topicOptions.map((value) => `<option value="${escapeHtml(value)}" data-base-label="${escapeHtml(value)}"${topicFilter === value ? ' selected' : ''}>${escapeHtml(value)}</option>`).join('')}
-      </select>
+    <div class="filter-panel" data-filter-panel="topic">
+      ${topicOptions.map((value) => `<div class="filter-option" data-option="${escapeHtml(value)}"><label><input type="checkbox" data-filter-key="topic" value="${escapeHtml(value)}"${topicFilter.includes(value) ? ' checked' : ''}> <span>${escapeHtml(value)}</span></label><span class="filter-count"></span></div>`).join('')}
     </div>
-    <div>
-      <label for="activity">Activity</label>
-      <select id="activity" name="activity">
-        <option value="">All activities</option>
-        ${activityOptions.map((value) => `<option value="${escapeHtml(value)}" data-base-label="${escapeHtml(value)}"${activityFilter === value ? ' selected' : ''}>${escapeHtml(value)}</option>`).join('')}
-      </select>
+    <div class="filter-panel" data-filter-panel="activity">
+      ${activityOptions.map((value) => `<div class="filter-option" data-option="${escapeHtml(value)}"><label><input type="checkbox" data-filter-key="activity" value="${escapeHtml(value)}"${activityFilter.includes(value) ? ' checked' : ''}> <span>${escapeHtml(value)}</span></label><span class="filter-count"></span></div>`).join('')}
     </div>
-    <div>
-      <label for="mode">Mode</label>
-      <select id="mode" name="mode">
-        <option value="">All modes</option>
-        <option value="irl"${modeFilter === 'irl' ? ' selected' : ''}>IRL</option>
-        <option value="online"${modeFilter === 'online' ? ' selected' : ''}>Online</option>
-      </select>
+    <div class="filter-panel" data-filter-panel="mode">
+      ${['irl', 'online'].map((value) => `<div class="filter-option" data-option="${escapeHtml(value)}"><label><input type="checkbox" data-filter-key="mode" value="${escapeHtml(value)}"${modeFilter.includes(value) ? ' checked' : ''}> <span>${escapeHtml(value === 'irl' ? 'IRL' : 'Online')}</span></label><span class="filter-count"></span></div>`).join('')}
     </div>
-    <div class="filter-actions">
-      <a class="clear-link" href="${buildUrl('/')}">Clear</a>
-    </div>
-  </form>` : view === 'email' ? `<div class="subtools"><a href="${buildUrl('/email.txt')}">plain text route</a> <button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('email-draft').innerText)">copy</button></div>` : ''}
-  ${view === 'events' ? `<ul id="event-list">
+  </div>
+  <div class="active-chips" id="active-chips"></div>
+  <p class="results-count" id="results-count"></p>
+  <ul id="event-list">
     ${deduped.map(e => `
       <li
         data-audience="${escapeHtml(encodeFilterValues(e.audience))}"
@@ -879,88 +892,186 @@ app.get('/', async (req, res) => {
   </ul>
   <script>
     (function () {
-      var form = document.getElementById('event-filters');
+      var toolbar = document.getElementById('filter-toolbar');
       var list = document.getElementById('event-list');
-      if (!form || !list) return;
+      var chips = document.getElementById('active-chips');
+      var resultsCount = document.getElementById('results-count');
+      if (!toolbar || !list || !chips || !resultsCount) return;
 
       var keys = ['audience', 'industry', 'topic', 'activity', 'mode'];
+      var labels = { audience: 'Audience', industry: 'Industry', topic: 'Topic', activity: 'Activity', mode: 'Mode' };
       var rows = Array.prototype.slice.call(list.querySelectorAll('li'));
+      var buttons = {};
+      var panels = {};
+
+      keys.forEach(function (key) {
+        buttons[key] = toolbar.querySelector('[data-filter-button="' + key + '"]');
+        panels[key] = toolbar.querySelector('[data-filter-panel="' + key + '"]');
+      });
 
       function matches(rowValue, selectedValue) {
-        if (!selectedValue) return true;
-        return String(rowValue || '').split('|').includes(selectedValue);
+        if (!selectedValue.length) return true;
+        var values = String(rowValue || '').split('|').filter(Boolean);
+        return selectedValue.some(function (item) { return values.includes(item); });
       }
 
       function rowMatchesFilters(row, values, skipKey) {
-        return (!values.audience || skipKey === 'audience' || matches(row.dataset.audience, values.audience)) &&
-          (!values.industry || skipKey === 'industry' || matches(row.dataset.industry, values.industry)) &&
-          (!values.topic || skipKey === 'topic' || matches(row.dataset.topic, values.topic)) &&
-          (!values.activity || skipKey === 'activity' || matches(row.dataset.activity, values.activity)) &&
-          (!values.mode || skipKey === 'mode' || matches(row.dataset.mode, values.mode));
+        return (skipKey === 'audience' || matches(row.dataset.audience, values.audience)) &&
+          (skipKey === 'industry' || matches(row.dataset.industry, values.industry)) &&
+          (skipKey === 'topic' || matches(row.dataset.topic, values.topic)) &&
+          (skipKey === 'activity' || matches(row.dataset.activity, values.activity)) &&
+          (skipKey === 'mode' || matches(row.dataset.mode, values.mode));
       }
 
       function getRowValues(row, key) {
         return String(row.dataset[key] || '').split('|').filter(Boolean);
       }
 
-      function updateOptions(values) {
+      function currentValues() {
+        var values = {};
         keys.forEach(function (key) {
-          var control = form.elements[key];
-          if (!control) return;
+          values[key] = Array.prototype.slice.call(toolbar.querySelectorAll('input[data-filter-key="' + key + '"]:checked')).map(function (input) {
+            return String(input.value || '').trim().toLowerCase();
+          });
+        });
+        return values;
+      }
+
+      function updateOptions(values) {
+        var categoryTotals = {};
+        keys.forEach(function (key) {
+          var panel = panels[key];
+          if (!panel) return;
 
           var counts = {};
+          var total = 0;
           rows.forEach(function (row) {
             if (!rowMatchesFilters(row, values, key)) return;
+            if (getRowValues(row, key).length > 0) total += 1;
             getRowValues(row, key).forEach(function (value) {
               counts[value] = (counts[value] || 0) + 1;
             });
           });
+          categoryTotals[key] = total;
 
-          Array.prototype.forEach.call(control.options, function (option) {
-            if (!option.value) return;
-            var baseLabel = option.getAttribute('data-base-label') || option.value;
-            var count = counts[option.value] || 0;
-            option.textContent = count > 0 ? (baseLabel + ' (' + count + ')') : baseLabel;
-            option.hidden = count === 0 && option.value !== values[key];
+          Array.prototype.forEach.call(panel.querySelectorAll('.filter-option'), function (option) {
+            var optionValue = String(option.getAttribute('data-option') || '').trim().toLowerCase();
+            var count = counts[optionValue] || 0;
+            var countEl = option.querySelector('.filter-count');
+            if (countEl) countEl.textContent = count > 0 ? String(count) : '';
+            option.style.display = count === 0 && !values[key].includes(optionValue) ? 'none' : '';
           });
         });
+        return categoryTotals;
       }
 
       function syncUrl(values) {
         var params = new URLSearchParams(window.location.search);
         params.set('view', 'events');
         keys.forEach(function (key) {
-          if (values[key]) params.set(key, values[key]);
+          if (values[key].length) params.set(key, values[key].join(','));
           else params.delete(key);
         });
         var query = params.toString();
         window.history.replaceState({}, '', query ? ('/?' + query) : '/');
       }
 
-      function applyFilters() {
-        var values = {};
+      function updateButtons(values, categoryTotals) {
         keys.forEach(function (key) {
-          var control = form.elements[key];
-          values[key] = control ? String(control.value || '').trim().toLowerCase() : '';
+          var button = buttons[key];
+          if (!button) return;
+          var total = categoryTotals[key] || 0;
+          if (!values[key].length) {
+            button.textContent = labels[key] + ' ' + total + ' ▼';
+            button.classList.remove('active');
+            return;
+          }
+          var first = values[key][0] === 'irl' ? 'IRL' : values[key][0] === 'online' ? 'Online' : values[key][0];
+          button.textContent = labels[key] + ': ' + first + (values[key].length > 1 ? ' +' + (values[key].length - 1) : '') + ' (' + total + ') ▼';
+          button.classList.add('active');
         });
+      }
 
+      function updateChips(values) {
+        var items = [];
+        keys.forEach(function (key) {
+          values[key].forEach(function (value) {
+            items.push({ key: key, value: value });
+          });
+        });
+        chips.innerHTML = items.map(function (item) {
+          var label = item.value === 'irl' ? 'IRL' : item.value === 'online' ? 'Online' : item.value;
+          return '<button class="chip" type="button" data-chip-key="' + item.key + '" data-chip-value="' + item.value + '">' + labels[item.key] + ': ' + label + ' ×</button>';
+        }).join('');
+      }
+
+      function applyFilters() {
+        var values = currentValues();
+        var visibleCount = 0;
         rows.forEach(function (row) {
           var visible = rowMatchesFilters(row, values);
           row.style.display = visible ? '' : 'none';
+          if (visible) visibleCount += 1;
         });
 
-        updateOptions(values);
+        var categoryTotals = updateOptions(values);
+        updateButtons(values, categoryTotals);
+        updateChips(values);
+        resultsCount.textContent = visibleCount + ' event' + (visibleCount === 1 ? '' : 's');
         syncUrl(values);
       }
 
+      function closePanels(exceptKey) {
+        keys.forEach(function (key) {
+          if (!panels[key]) return;
+          panels[key].classList.toggle('open', key === exceptKey && !panels[key].classList.contains('open'));
+        });
+      }
+
       keys.forEach(function (key) {
-        var control = form.elements[key];
-        if (control) control.addEventListener('change', applyFilters);
+        var button = buttons[key];
+        if (button) {
+          button.addEventListener('click', function () {
+            var willOpen = !panels[key].classList.contains('open');
+            keys.forEach(function (otherKey) {
+              if (panels[otherKey]) panels[otherKey].classList.remove('open');
+            });
+            if (willOpen && panels[key]) panels[key].classList.add('open');
+          });
+        }
+        Array.prototype.forEach.call(toolbar.querySelectorAll('input[data-filter-key="' + key + '"]'), function (input) {
+          input.addEventListener('change', applyFilters);
+        });
       });
 
-      form.addEventListener('submit', function (event) {
-        event.preventDefault();
+      document.getElementById('clear-filters').addEventListener('click', function () {
+        Array.prototype.forEach.call(toolbar.querySelectorAll('input[type="checkbox"]'), function (input) {
+          input.checked = false;
+        });
+        keys.forEach(function (key) {
+          if (panels[key]) panels[key].classList.remove('open');
+        });
         applyFilters();
+      });
+
+      chips.addEventListener('click', function (event) {
+        var button = event.target.closest('.chip');
+        if (!button) return;
+        var key = button.getAttribute('data-chip-key');
+        var value = button.getAttribute('data-chip-value');
+        var input = toolbar.querySelector('input[data-filter-key="' + key + '"][value="' + value + '"]');
+        if (input) {
+          input.checked = false;
+          applyFilters();
+        }
+      });
+
+      document.addEventListener('click', function (event) {
+        if (!toolbar.contains(event.target)) {
+          keys.forEach(function (key) {
+            if (panels[key]) panels[key].classList.remove('open');
+          });
+        }
       });
 
       applyFilters();
