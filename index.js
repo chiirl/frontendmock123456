@@ -26,8 +26,8 @@ const EVENTS_TABLE_NAME = process.env.SUPABASE_TABLE || 'beta_chiirl_events';
 const CHICAGO_TIMEZONE = 'America/Chicago';
 
 function getView(req) {
-  if (req.query.view === 'email') return 'email';
-  if (req.query.view === 'calendar') return 'calendar';
+  if (req.path === '/email') return 'email';
+  if (req.path.startsWith('/calendar')) return 'calendar';
   return 'events';
 }
 
@@ -732,10 +732,10 @@ app.post('/me/profile', async (req, res) => {
   }
 });
 
-app.get('/', async (req, res) => {
+app.get(['/', '/email', '/calendar/:month?'], async (req, res) => {
   const auth = await getSessionContext(req, res);
   const view = getView(req);
-  const monthParam = String(req.query.month || '');
+  const monthParam = String(req.params.month || '');
   const audienceFilter = parseFilterList(req.query.audience);
   const industryFilter = parseFilterList(req.query.industry);
   const topicFilter = parseFilterList(req.query.topic);
@@ -840,8 +840,8 @@ app.get('/', async (req, res) => {
   ${renderAuthLinks(auth)}
   <div class="tabs">
     <a href="${buildUrl('/', currentFilters)}"${view === 'events' ? ' class="active"' : ''}>Events</a>
-    <a href="${buildUrl('/', { view: 'email', ...currentFilters })}"${view === 'email' ? ' class="active"' : ''}>Email Draft</a>
-    <a href="${buildUrl('/', { view: 'calendar', month: calendar.monthParam, ...currentFilters })}"${view === 'calendar' ? ' class="active"' : ''}>Calendar</a>
+    <a href="/email"${view === 'email' ? ' class="active"' : ''}>Email Draft</a>
+    <a href="/calendar${calendar.monthParam ? '/' + calendar.monthParam : ''}"${view === 'calendar' ? ' class="active"' : ''}>Calendar</a>
   </div>
   <p><a href="${buildUrl('/archive')}">archive</a> | <a href="${buildUrl('/raw')}">raw table</a></p>
   ${view === 'events' ? `<div class="filter-toolbar" id="filter-toolbar">
@@ -980,11 +980,9 @@ app.get('/', async (req, res) => {
       }
 
       function syncUrl(values) {
-        var params = new URLSearchParams(window.location.search);
-        params.set('view', 'events');
+        var params = new URLSearchParams();
         keys.forEach(function (key) {
           if (values[key].length) params.set(key, values[key].join(','));
-          else params.delete(key);
         });
         var query = params.toString();
         window.history.replaceState({}, '', query ? ('/?' + query) : '/');
@@ -1093,9 +1091,9 @@ app.get('/', async (req, res) => {
   </script>` : view === 'email' ? `<pre id="email-draft" class="email-draft">${emailDraftHtml}</pre>` : `
   <div class="calendar-wrap">
     <div class="calendar-head">
-      <a href="${buildUrl('/', { view: 'calendar', month: calendar.prevMonthParam })}">&larr; Prev</a>
+      <a href="/calendar/${calendar.prevMonthParam}">&larr; Prev</a>
       <span class="month">${escapeHtml(calendar.monthLabel)}</span>
-      <a href="${buildUrl('/', { view: 'calendar', month: calendar.nextMonthParam })}">Next &rarr;</a>
+      <a href="/calendar/${calendar.nextMonthParam}">Next &rarr;</a>
     </div>
     <table class="calendar">
       <thead>
