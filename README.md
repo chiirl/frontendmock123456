@@ -1,32 +1,32 @@
-# CHIIRL Supa Hookup
+# CHI IRL
 
-CHIIRL Supa Hookup is the ingestion and API workspace for Chicago tech/startup event data.
+This repo now has two maintained products:
 
-It currently supports scraping and inserting events into Supabase from:
-- Luma
-- Meetup
-- mHUB (direct event pages)
-- Eventbrite
+- `apps/scraper`
+  - weekly Chicago IRL event discovery, ingestion, auditing, and reconciliation
+- `apps/frontend`
+  - Express frontend and API for the curated event set in Supabase
 
-## What This Repo Contains
+Everything maintained in the active repo should support one of those two products.
+Old one-off research scripts have been moved to `archive/manual-research/`.
 
-- `scripts/chibot.js`
-  - Main event ingestion script.
-  - Discovery mode (city + seed expansion) and strict URL mode.
-- `scripts/meetup-login-headed.js`
-  - Creates Meetup Playwright auth state for gated Meetup pages.
-- `index.js`
-  - Express API/server for reading event data.
-- `docs/PROGRESS.md`
-  - Working log of what has been implemented and validated.
-- `sql/`
-  - Table/schema migration helpers.
+## Repo Layout
+
+```text
+apps/
+  frontend/
+  scraper/
+archive/
+  manual-research/
+docs/
+sql/
+```
 
 ## Requirements
 
 - Node.js 18+
-- A Supabase project + keys
-- Optional: Playwright Chromium (for Meetup auth fallback)
+- Supabase project + keys
+- Optional: Playwright Chromium for login-assisted scraping
 
 ## Environment
 
@@ -46,155 +46,63 @@ APP_BASE_URL=http://localhost:3000
 npm install
 ```
 
-If you will use Meetup authenticated fallback:
+If you need headed login helpers:
 
 ```bash
 npx playwright install chromium
 ```
 
-## How To Use
-
-### 1. Discovery mode (routine crawl)
-
-Scrapes the Luma city listing, expands from current/upcoming event seeds already in Supabase, filters to relevant Chicago ecosystem events, then inserts new rows.
-
-```bash
-node scripts/chibot.js --city chicago --max 30
-```
-
-Dry run:
-
-```bash
-node scripts/chibot.js --city chicago --max 30 --dry-run
-```
-
-### 2. Strict URL mode (targeted ingest)
-
-Only processes the URLs you provide.
-
-```bash
-node scripts/chibot.js --urls "https://luma.com/abc123,https://www.meetup.com/group/events/123456789,https://www.mhubchicago.com/events/example,https://www.eventbrite.com/e/example-123"
-```
-
-Dry run:
-
-```bash
-node scripts/chibot.js --dry-run --urls "https://www.eventbrite.com/e/example-123"
-```
-
-### 3. Meetup auth fallback (optional)
-
-Needed for Meetup pages that hide event JSON-LD unless logged in.
-
-Generate login state (headed browser):
-
-```bash
-npm run meetup:login -- --email <your_meetup_email>
-```
-
-Then run ingestion with auth enabled:
-
-```bash
-node scripts/chibot.js --meetup-auth --meetup-state .auth/meetup-state.json --urls "https://www.meetup.com/group/events/123456789"
-```
-
-## Run API Server
+## Frontend Commands
 
 ```bash
 npm start
-```
-
-Dev mode:
-
-```bash
 npm run dev
 ```
 
-Background dev watcher:
+## Scraper Commands
+
+Discovery only, no writes:
 
 ```bash
-npm run dev:up
+npm run scraper:discover -- --city chicago --max 30
 ```
 
-## Auth + Profiles
-
-The Express app now includes a minimal Supabase Auth flow for CHIIRL:
-- `GET /auth` shows email magic-link sign-in
-- `GET /auth/callback` verifies the magic-link token and creates a session
-- `GET /me` shows the authenticated user and bootstrapped profile
-- `GET /api/me` returns the current auth user + profile as JSON
-
-This app follows the server-side Supabase email flow using `token_hash`.
-The default Supabase magic-link template that returns `#access_token=...` in the URL fragment is not used here.
-
-Before using those routes, create the shared `ctc_v2_profiles` table:
+Ingest new or changed events:
 
 ```bash
-psql "$DATABASE_URL" -f sql/create_ctc_v2_profiles_table.sql
+npm run scraper:ingest -- --city chicago --max 30
 ```
 
-The first successful sign-in creates a `ctc_v2_profiles` row with:
-- `id` = Supabase Auth user id
-- `email`
-- `display_name`
-- `profile_type = person`
-- optional `avatar_url`
+Audit the upcoming DB for duplicates, online rows, non-Chicago rows, and missing fields:
 
-`username` can be edited later on `/me`.
-
-### Supabase Email Template
-
-In Supabase `Authentication` -> `Email Templates` -> Magic Link, use a link that sends `token_hash` to this app's callback via `{{ .RedirectTo }}`:
-
-```html
-<a href="{{ .RedirectTo }}&token_hash={{ .TokenHash }}&type=email">
-  Sign in to CHIIRL
-</a>
+```bash
+npm run scraper:audit
 ```
 
-Recommended URL setup:
-- `Site URL`: `http://localhost:3000` in local dev
-- Redirect allowlist should include `http://localhost:3000/auth/callback`
+Reconcile candidate discoveries against the DB:
 
-When CHIIRL sends the email, it sets `redirectTo` to `http://localhost:3000/auth/callback?next=%2Fme`, and the email template appends the one-time `token_hash` for server-side verification.
+```bash
+npm run scraper:reconcile -- --urls "https://luma.com/abc123"
+```
 
-## Data Notes
+## Login Helpers
 
-`chibot` writes rows to `beta_chiirl_events` using fields like:
-- `title`
-- `start_datetime`
-- `Online`
-- `tags`
-- `image_url`
-- `eventUrl`
-- `location`
-- `google_maps_url`
+```bash
+npm run meetup:login -- --email <your_meetup_email>
+npm run luma:login
+```
 
-It de-duplicates by existing `eventUrl` values before insert.
+## Current Weekly Operating Loop
 
-The current prototype also uses structured taxonomy columns on `beta_chiirl_events`:
-- `audience text[]`
-- `industry text[]`
-- `topic text[]`
-- `activity text[]`
+1. Run `scraper:discover` or `scraper:reconcile`
+2. Review the dry-run output and scrape dump
+3. Run `scraper:ingest`
+4. Run `scraper:audit`
+5. Investigate anything reported as stale, unsupported, duplicate, online, or non-Chicago
 
-Those fields are currently backfilled by rule-based scripts:
-- `sql/add_event_taxonomy_columns.sql`
-- `scripts/backfill-event-taxonomy.js`
-- `scripts/propose-event-taxonomy.js`
+## Notes
 
-Current UI behavior on `/`:
-- event filtering is client-side for the `Events` tab
-- filters are dropdowns for `audience`, `industry`, `topic`, `activity`, and `mode`
-- dropdown option counts update live based on the current filter context
-- zero-result dropdown options are hidden unless already selected
-- `networking` is treated as a fallback activity, not a co-equal activity when a stronger activity exists
-
-## Troubleshooting
-
-- `Missing SUPABASE_URL or SUPABASE_SECRET_KEY in .env`
-  - Check `.env` names and values.
-- `missing event JSON-LD`
-  - Some pages are gated or malformed; try Meetup auth mode for Meetup links.
-- `unsupported host`
-  - Current first-class hosts: Luma, Meetup, mHUB, Eventbrite.
+- The scraper writes to `beta_chiirl_events` by default.
+- The frontend reads from the same table.
+- SQL migrations remain in `sql/`.
+- Working notes remain in `docs/`.

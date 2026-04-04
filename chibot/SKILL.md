@@ -15,7 +15,7 @@ Use this skill when the user wants to ingest Chicago tech/startup events into Su
 
 ## Prerequisites
 
-- Repo root: `/home/ev/chiirl-supa-hookup`
+- Repo root: `/Users/evbogue/Code/frontendmock123456`
 - `.env` contains:
   - `SUPABASE_URL`
   - `SUPABASE_SECRET_KEY`
@@ -27,7 +27,7 @@ Use this skill when the user wants to ingest Chicago tech/startup events into Su
 Scrape `luma.com/chicago`, expand from known seed pages, filter relevant events, de-duplicate by `eventUrl`, and insert:
 
 ```bash
-node scripts/chibot.js --city chicago --max 30
+npm run scraper:ingest -- --city chicago --max 30
 ```
 
 ## Safer Review Mode
@@ -35,7 +35,7 @@ node scripts/chibot.js --city chicago --max 30
 Preview payload and skip reasons before writing:
 
 ```bash
-node scripts/chibot.js --city chicago --max 30 --dry-run
+npm run scraper:discover -- --city chicago --max 30
 ```
 
 Then run without `--dry-run` to insert.
@@ -45,7 +45,7 @@ Then run without `--dry-run` to insert.
 Use explicit URLs when the user sends specific listings. This mode skips seed expansion and ingests only the provided URLs:
 
 ```bash
-node scripts/chibot.js --urls "https://luma.com/abc12345,https://www.meetup.com/group/events/123456789,https://www.mhubchicago.com/events/some-event-123456,https://www.eventbrite.com/e/example-event-123456789"
+npm run scraper:ingest -- --urls "https://luma.com/abc12345,https://www.meetup.com/group/events/123456789,https://www.mhubchicago.com/events/some-event-123456,https://www.eventbrite.com/e/example-event-123456789"
 ```
 
 ## Optional Meetup Auth Fallback
@@ -53,7 +53,7 @@ node scripts/chibot.js --urls "https://luma.com/abc12345,https://www.meetup.com/
 Meetup auth fallback is optional and off by default. Enable it only when needed for member-gated Meetup pages that do not expose JSON-LD in normal fetches.
 
 ```bash
-node scripts/chibot.js --meetup-auth --meetup-state .auth/meetup-state.json --urls "https://www.meetup.com/group/events/123456789"
+npm run scraper:ingest -- --meetup-auth --meetup-state .auth/meetup-state.json --urls "https://www.meetup.com/group/events/123456789"
 ```
 
 - Requires a saved Playwright storage state file.

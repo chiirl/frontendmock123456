@@ -41,14 +41,14 @@ Track what event sources are already covered, identify missing platforms, and op
 
 ### Discovery mode (broad crawl)
 ```bash
-node scripts/chibot.js --city chicago --max 30
+npm run scraper:ingest -- --city chicago --max 30
 ```
 - Uses Luma city/listing + seed expansion.
 - Applies relevance + Chicago-area filters.
 
 ### Strict URL mode (targeted)
 ```bash
-node scripts/chibot.js --dry-run --urls "<url1>,<url2>,..."
+npm run scraper:reconcile -- --urls "<url1>,<url2>,..."
 ```
 - Ingests only provided URLs.
 - Supports Luma + Meetup + direct mHUB event URLs.
@@ -85,7 +85,7 @@ Both produced valid event rows with `title`, `start_datetime`, `tags`, `eventUrl
 ## Eventbrite Ingestion Added (March 13, 2026)
 
 ### What changed
-- Added Eventbrite host support to `scripts/chibot.js`:
+- Added Eventbrite host support to the scraper entrypoint now located at `apps/scraper/src/cli/discover.js`:
   - URL canonicalization now normalizes Eventbrite links.
   - Strict URL ingestion now accepts Eventbrite pages.
   - Unsupported-host message updated to include Eventbrite.
