@@ -1,0 +1,6 @@
+{
+  "name": "@chiirl/frontend",
+  "private": true,
+  "version": "1.0.0",
+  "main": "src/server.js"
+}

@@ -2,14 +2,6 @@ const path = require('path');
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
-const {
-  clearSessionCookies,
-  createPublicClient,
-  ensureProfile,
-  getSessionContext,
-  setSessionCookies,
-  updateProfile
-} = require('./auth');
 
 const app = express();
 app.use(express.json());
@@ -43,27 +35,6 @@ function buildUrl(path, params = {}) {
   });
   const qs = query.toString();
   return qs ? `${path}?${qs}` : path;
-}
-
-function buildAppBaseUrl(req) {
-  if (process.env.APP_BASE_URL) return process.env.APP_BASE_URL.replace(/\/+$/, '');
-  const proto = req.get('x-forwarded-proto') || req.protocol || 'http';
-  return `${proto}://${req.get('host')}`;
-}
-
-function getSafeNextPath(value) {
-  const next = String(value || '').trim();
-  if (!next.startsWith('/')) return '/me';
-  if (next.startsWith('//')) return '/me';
-  return next;
-}
-
-function renderAuthLinks(auth) {
-  if (auth?.user) {
-    const label = escapeHtml(auth.profile?.display_name || auth.user.email || 'My Profile');
-    return `<p><a href="/me">${label}</a></p>`;
-  }
-  return '<p><a href="/auth">Sign in</a></p>';
 }
 
 function renderLogoStyles() {
@@ -458,7 +429,7 @@ function formatChicagoDateTime(raw, includeYearIfPast = false) {
 }
 
 app.get('/logo.png', (req, res) => {
-  res.sendFile(path.join(__dirname, 'Logo_on_light_bg.png'));
+  res.sendFile(path.resolve(__dirname, '../../../Logo_on_light_bg.png'));
 });
 
 app.get('/api/events', async (req, res) => {
@@ -470,270 +441,7 @@ app.get('/api/events', async (req, res) => {
   res.json(data);
 });
 
-app.get('/api/me', async (req, res) => {
-  try {
-    const auth = await getSessionContext(req, res);
-    if (!auth.user) return res.status(401).json({ error: 'Not signed in' });
-    const profile = auth.profile || await ensureProfile(auth.user);
-    return res.json({
-      user: {
-        id: auth.user.id,
-        email: auth.user.email
-      },
-      profile
-    });
-  } catch (error) {
-    return res.status(500).json({ error: error.message });
-  }
-});
-
-app.get('/auth', async (req, res) => {
-  const auth = await getSessionContext(req, res);
-  if (auth.user) return res.redirect('/me');
-
-  const message = String(req.query.message || '');
-  const error = String(req.query.error || '');
-  const html = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>CHIIRL | Sign In</title>
-  <style>
-    ${renderLogoStyles()}
-    ${renderThemeStyles()}
-    body { font-family: arial, helvetica, sans-serif; font-size: 14px; background: #f0f0e8; color: #222; margin: 0; padding: 10px; }
-    form { max-width: 460px; background: #fff; border: 1px solid #bbb; padding: 12px; }
-    label { display: block; margin-bottom: 6px; font-weight: bold; }
-    input[type="email"] { width: 100%; box-sizing: border-box; padding: 8px; margin-bottom: 10px; }
-    .note { max-width: 460px; margin-bottom: 10px; }
-    .msg { max-width: 460px; padding: 8px 10px; border: 1px solid #bbb; margin-bottom: 10px; background: #fff; }
-    .err { border-color: #b33; background: #fff0f0; }
-  </style>
-</head>
-<body>
-  <img class="site-logo" src="/logo.png" alt="CHIIRL | Chicago In Real Life">
-  <h1>CHIIRL | Sign In</h1>
-  <p><a href="/">back to events</a></p>
-  ${message ? `<p class="msg">${escapeHtml(message)}</p>` : ''}
-  ${error ? `<p class="msg err">${escapeHtml(error)}</p>` : ''}
-  <p class="note">Enter your email and CHIIRL will send you a Supabase magic link. Your profile record is created the first time you finish sign-in.</p>
-  <form method="post" action="/auth/sign-in">
-    <label for="email">Email</label>
-    <input id="email" name="email" type="email" autocomplete="email" required>
-    <button type="submit">Send magic link</button>
-  </form>
-</body>
-</html>`;
-  res.send(html);
-});
-
-app.post('/auth/sign-in', async (req, res) => {
-  const email = String(req.body.email || '').trim().toLowerCase();
-  if (!email) {
-    return res.redirect('/auth?error=Email%20is%20required');
-  }
-
-  try {
-    const supabaseAuth = createPublicClient();
-    const redirectTo = `${buildAppBaseUrl(req)}/auth/callback?next=${encodeURIComponent('/me')}`;
-    const { error } = await supabaseAuth.auth.signInWithOtp({
-      email,
-      options: { emailRedirectTo: redirectTo }
-    });
-    if (error) {
-      return res.redirect(`/auth?error=${encodeURIComponent(error.message)}`);
-    }
-    return res.redirect(`/auth?message=${encodeURIComponent(`Magic link sent to ${email}`)}`);
-  } catch (error) {
-    return res.redirect(`/auth?error=${encodeURIComponent(error.message)}`);
-  }
-});
-
-app.get('/auth/callback', async (req, res) => {
-  const code = String(req.query.code || '');
-  const tokenHash = String(req.query.token_hash || '');
-  const type = String(req.query.type || 'email');
-  const next = getSafeNextPath(req.query.next);
-  if (!code && !tokenHash) {
-    return res.send(`<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>CHIIRL | Finishing Sign In</title>
-</head>
-<body>
-  <p>Finishing sign-in...</p>
-  <script>
-    (async function () {
-      var hash = new URLSearchParams(window.location.hash.slice(1));
-      var accessToken = hash.get('access_token');
-      var refreshToken = hash.get('refresh_token');
-      if (!accessToken || !refreshToken) {
-        document.body.innerHTML =
-          '<p>Auth callback is missing a server-readable token.</p>' +
-          '<p>Update the Supabase Magic Link email template to use <code>{{ .RedirectTo }}</code> and append <code>token_hash</code> plus <code>type=email</code>.</p>';
-        return;
-      }
-
-      var response = await fetch('/auth/callback/session?next=${encodeURIComponent(next)}', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
-        body: JSON.stringify({
-          access_token: accessToken,
-          refresh_token: refreshToken
-        })
-      });
-      var result = await response.json().catch(function () { return {}; });
-      if (!response.ok || !result.next) {
-        document.body.innerHTML =
-          '<p>Unable to finish sign-in.</p>' +
-          '<p>Please request a new magic link or verify the Supabase email template.</p>';
-        return;
-      }
-      window.location.replace(result.next);
-    })();
-  </script>
-</body>
-</html>`);
-  }
-
-  try {
-    const supabaseAuth = createPublicClient();
-    const result = code
-      ? await supabaseAuth.auth.exchangeCodeForSession(code)
-      : await supabaseAuth.auth.verifyOtp({
-          token_hash: tokenHash,
-          type
-        });
-    const { data, error } = result;
-    if (error || !data?.session?.user) {
-      throw error || new Error('Unable to create session');
-    }
-    setSessionCookies(res, data.session);
-    await ensureProfile(data.session.user);
-    return res.redirect(next);
-  } catch (error) {
-    return res.redirect(`/auth?error=${encodeURIComponent(error.message)}`);
-  }
-});
-
-app.post('/auth/callback/session', async (req, res) => {
-  const next = getSafeNextPath(req.query.next);
-  const accessToken = String(req.body.access_token || '');
-  const refreshToken = String(req.body.refresh_token || '');
-  if (!accessToken || !refreshToken) {
-    return res.status(400).json({ error: 'Missing access_token or refresh_token' });
-  }
-
-  try {
-    const supabaseAuth = createPublicClient();
-    const { data, error } = await supabaseAuth.auth.setSession({
-      access_token: accessToken,
-      refresh_token: refreshToken
-    });
-    if (error || !data?.session?.user) {
-      throw error || new Error('Unable to create session');
-    }
-    setSessionCookies(res, data.session);
-    await ensureProfile(data.session.user);
-    return res.json({ next });
-  } catch (error) {
-    return res.status(400).json({ error: error.message });
-  }
-});
-
-app.post('/auth/sign-out', async (req, res) => {
-  clearSessionCookies(res);
-  res.redirect('/');
-});
-
-app.get('/me', async (req, res) => {
-  try {
-    const auth = await getSessionContext(req, res);
-    if (!auth.user) return res.redirect('/auth');
-
-    const profile = auth.profile || await ensureProfile(auth.user);
-    const message = String(req.query.message || '');
-    const error = String(req.query.error || '');
-  const html = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>CHIIRL | My Profile</title>
-  <style>
-    ${renderLogoStyles()}
-    ${renderThemeStyles()}
-    body { font-family: arial, helvetica, sans-serif; font-size: 14px; background: #f0f0e8; color: #222; margin: 0; padding: 10px; }
-    .card { max-width: 640px; background: #fff; border: 1px solid #bbb; padding: 12px; margin-bottom: 12px; }
-    label { display: block; margin-bottom: 6px; font-weight: bold; }
-    input[type="text"] { width: 100%; box-sizing: border-box; padding: 8px; margin-bottom: 10px; }
-    .row { margin-bottom: 8px; }
-    .msg { max-width: 640px; padding: 8px 10px; border: 1px solid #bbb; margin-bottom: 10px; background: #fff; }
-    .err { border-color: #b33; background: #fff0f0; }
-    code { background: #eee; padding: 1px 4px; }
-  </style>
-</head>
-<body>
-  <img class="site-logo" src="/logo.png" alt="CHIIRL | Chicago In Real Life">
-  <h1>CHIIRL | My Profile</h1>
-  <p><a href="/">back to events</a></p>
-  ${message ? `<p class="msg">${escapeHtml(message)}</p>` : ''}
-  ${error ? `<p class="msg err">${escapeHtml(error)}</p>` : ''}
-  <div class="card">
-    <div class="row"><strong>Email:</strong> ${escapeHtml(auth.user.email || '')}</div>
-    <div class="row"><strong>Profile ID:</strong> <code>${escapeHtml(profile.id)}</code></div>
-    <div class="row"><strong>Profile Type:</strong> ${escapeHtml(profile.profile_type || 'person')}</div>
-  </div>
-  <form class="card" method="post" action="/me/profile">
-    <label for="display_name">Display Name</label>
-    <input id="display_name" name="display_name" type="text" maxlength="80" value="${escapeHtml(profile.display_name || '')}" required>
-    <label for="username">Username</label>
-    <input id="username" name="username" type="text" maxlength="40" value="${escapeHtml(profile.username || '')}" pattern="[a-z0-9_\\-]*">
-    <button type="submit">Save profile</button>
-  </form>
-  <form method="post" action="/auth/sign-out">
-    <button type="submit">Sign out</button>
-  </form>
-</body>
-</html>`;
-    return res.send(html);
-  } catch (error) {
-    return res.status(500).send(`Error loading profile: ${escapeHtml(error.message)}`);
-  }
-});
-
-app.post('/me/profile', async (req, res) => {
-  try {
-    const auth = await getSessionContext(req, res);
-    if (!auth.user) return res.redirect('/auth');
-
-    const displayName = String(req.body.display_name || '').trim();
-    const username = String(req.body.username || '').trim();
-    if (!displayName) {
-      return res.redirect('/me?error=Display%20name%20is%20required');
-    }
-    if (username && !/^[a-z0-9_-]+$/.test(username)) {
-      return res.redirect('/me?error=Username%20may%20only%20use%20lowercase%20letters,%20numbers,%20hyphens,%20and%20underscores');
-    }
-
-    await ensureProfile(auth.user);
-    await updateProfile(auth.user.id, {
-      display_name: displayName,
-      username
-    });
-    return res.redirect('/me?message=Profile%20saved');
-  } catch (error) {
-    const msg = error.code === '23505' ? 'Username already taken' : error.message;
-    return res.redirect(`/me?error=${encodeURIComponent(msg)}`);
-  }
-});
-
 app.get(['/', '/email', '/calendar/:month?'], async (req, res) => {
-  const auth = await getSessionContext(req, res);
   const view = getView(req);
   const monthParam = String(req.params.month || '');
   const audienceFilter = parseFilterList(req.query.audience);
@@ -837,7 +545,6 @@ app.get(['/', '/email', '/calendar/:month?'], async (req, res) => {
 <body>
   <img class="site-logo" src="/logo.png" alt="CHIIRL | Chicago In Real Life">
   <h1>Chicago In Real Life | The Top Tech & Startup Events</h1>
-  ${renderAuthLinks(auth)}
   <div class="tabs">
     <a href="${buildUrl('/', currentFilters)}"${view === 'events' ? ' class="active"' : ''}>Events</a>
     <a href="/email"${view === 'email' ? ' class="active"' : ''}>Email Draft</a>
@@ -1178,7 +885,6 @@ app.get('/event', async (req, res) => {
 <body>
   <img class="site-logo" src="/logo.png" alt="CHIIRL | Chicago In Real Life">
   <h1>${event.title}</h1>
-  ${renderAuthLinks(await getSessionContext(req, res))}
   <p><a href="${buildUrl('/')}">back</a></p>
   <table>
     ${fields.map(([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join('')}
@@ -1190,7 +896,6 @@ app.get('/event', async (req, res) => {
 });
 
 app.get('/archive', async (req, res) => {
-  const auth = await getSessionContext(req, res);
   const { data: events, error } = await supabase
     .from(EVENTS_TABLE_NAME)
     .select('*')
@@ -1220,7 +925,6 @@ app.get('/archive', async (req, res) => {
 <body>
   <img class="site-logo" src="/logo.png" alt="CHIIRL | Chicago In Real Life">
   <h1>CHIIRL | Archive</h1>
-  ${renderAuthLinks(auth)}
   <p><a href="${buildUrl('/')}">back to upcoming</a></p>
   <ul>
     ${events.map(e => `
@@ -1242,7 +946,6 @@ app.get('/archive', async (req, res) => {
 });
 
 app.get('/raw', async (req, res) => {
-  const auth = await getSessionContext(req, res);
   const { data: events, error } = await supabase
     .from(EVENTS_TABLE_NAME)
     .select('*')
@@ -1272,7 +975,6 @@ app.get('/raw', async (req, res) => {
 <body>
   <img class="site-logo" src="/logo.png" alt="CHIIRL | Chicago In Real Life">
   <h1>CHIIRL | Raw Data</h1>
-  ${renderAuthLinks(auth)}
   <p><a href="${buildUrl('/')}">back</a></p>
   <table>
     <tr>${cols.map(c => `<th>${c}</th>`).join('')}</tr>
