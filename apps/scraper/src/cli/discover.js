@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 const fs = require('fs');
+const path = require('path');
 const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
 
@@ -16,7 +17,24 @@ const INCLUDE_KEYWORDS = [
   'healthtech',
   'vc',
   'venture',
+  'venture capital',
   'investor',
+  'product',
+  'design',
+  'security',
+  'cybersecurity',
+  'data science',
+  'data',
+  'cloud',
+  'cloud native',
+  'quantum',
+  'book club',
+  'speaker series',
+  'workshop',
+  'seminar',
+  'bitcoin',
+  'linux',
+  'robotics',
   'product builder',
   'community meetup'
 ];
@@ -26,9 +44,6 @@ const EXCLUDE_KEYWORDS = [
   'party',
   'mahjong',
   'ballet',
-  'film',
-  'showcase',
-  'reception',
   'bowling',
   'bazaar',
   'concert',
@@ -39,6 +54,7 @@ const EXCLUDE_KEYWORDS = [
 
 const SCRAPE_DUMP_DIR = '.scrape-dumps';
 const SEED_PAGE_CACHE_FILE = 'seed-pages-cache.json';
+const CURATED_SEED_FILE = 'event-seeds.json';
 const FETCH_TIMEOUT_MS = 10000;
 const FETCH_TOTAL_BUDGET_MS = 15000;
 const MAX_FETCH_ATTEMPTS = 3;
@@ -183,13 +199,13 @@ function canonicalizeUrl(input) {
     if (
       host.includes('startupgrind.com') ||
       host === 'fi.co' ||
-      host.includes('uchicago.edu') ||
       host.includes('maps.apple.com')
     ) {
       return null;
     }
     u.hash = '';
-    return null;
+    u.search = '';
+    return u.toString().replace(/\/+$/, '');
   } catch {
     return null;
   }
@@ -518,7 +534,21 @@ function decodeHtmlEntities(s) {
     .replace(/&quot;/g, '"')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
-    .replace(/&nbsp;/g, ' ');
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&#(\d+);/g, (_, code) => {
+      try {
+        return String.fromCodePoint(Number(code));
+      } catch {
+        return _;
+      }
+    })
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => {
+      try {
+        return String.fromCodePoint(parseInt(hex, 16));
+      } catch {
+        return _;
+      }
+    });
 }
 
 function extractByIdText(html, id) {
@@ -592,10 +622,6 @@ async function fetchSingleEventRow(url, strictUrlsMode) {
     const row = parseMhubEvent(html, url);
     if (!row) return { skip: { url, reason: 'missing mHUB title/date' } };
     return { row };
-  }
-
-  if (!isLumaUrl(url) && !isMeetupUrl(url) && !isEventbriteUrl(url)) {
-    return { skip: { url, reason: 'unsupported host (only luma + meetup + mhub + eventbrite)' } };
   }
 
   const event = extractEventJsonLd(html);
@@ -764,44 +790,45 @@ function extractMetaContent(html, attr, value) {
   return decodeHtmlEntities(mReverse[1]);
 }
 
-function extractEventJsonLd(html) {
+function extractJsonLdEvents(html) {
+  const out = [];
+  const seen = new Set();
   const isEventType = (value) => {
     if (!value) return false;
     if (Array.isArray(value)) return value.some((v) => isEventType(v));
     const t = String(value).toLowerCase();
     return t === 'event' || t.endsWith('event');
   };
-
-  const findEventNode = (node) => {
-    if (!node || typeof node !== 'object') return null;
+  const walk = (node) => {
+    if (!node || typeof node !== 'object') return;
     if (Array.isArray(node)) {
-      for (const item of node) {
-        const found = findEventNode(item);
-        if (found) return found;
+      for (const item of node) walk(item);
+      return;
+    }
+    if (isEventType(node['@type'])) {
+      const key = JSON.stringify([node['@id'], node.url, node.name, node.startDate]);
+      if (!seen.has(key)) {
+        seen.add(key);
+        out.push(node);
       }
-      return null;
     }
-    if (isEventType(node['@type'])) return node;
-    for (const key of Object.keys(node)) {
-      const found = findEventNode(node[key]);
-      if (found) return found;
-    }
-    return null;
+    for (const key of Object.keys(node)) walk(node[key]);
   };
-
   const re = /<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
   let m;
   while ((m = re.exec(html)) !== null) {
     const raw = m[1].trim();
     try {
-      const parsed = JSON.parse(raw);
-      const eventItem = findEventNode(parsed);
-      if (eventItem) return eventItem;
+      walk(JSON.parse(raw));
     } catch {
       continue;
     }
   }
-  return null;
+  return out;
+}
+
+function extractEventJsonLd(html) {
+  return extractJsonLdEvents(html)[0] || null;
 }
 
 function classifyEvent(title, description) {
@@ -810,11 +837,11 @@ function classifyEvent(title, description) {
     ['ai', /\bai\b|\bartificial intelligence\b|\bllm(s)?\b|\bgenai\b/],
     ['startup', /\bstartup(s)?\b|\bstart-up(s)?\b|\bincubator\b|\baccelerator\b/],
     ['founder', /\bfounder(s)?\b|\bcofounder(s)?\b|\bco-founder(s)?\b|\bentrepreneur(s)?\b/],
-    ['tech', /\btech\b|\bdeveloper(s)?\b|\bengineering\b|\bsoftware\b/],
+    ['tech', /\btech\b|\bdeveloper(s)?\b|\bengineering\b|\bsoftware\b|\bdesign\b|\bproduct\b|\bcloud\b|\bsecurity\b|\bcybersecurity\b|\bdata science\b|\bdata\b|\bquantum\b|\bbitcoin\b|\blinux\b|\brobotics\b/],
     ['hackathon', /\bhackathon(s)?\b|\bbuildathon(s)?\b/],
     ['healthtech', /\bhealthtech\b|\bdigital health\b/],
-    ['venture', /\bvc\b|\bventure\b|\binvestor(s)?\b|\bfundraising\b/],
-    ['community meetup', /\bmeetup(s)?\b|\bnetworking\b|\bcommunity\b/]
+    ['venture', /\bvc\b|\bventure\b|\bventure capital\b|\binvestor(s)?\b|\bfundraising\b/],
+    ['community meetup', /\bmeetup(s)?\b|\bnetworking\b|\bcommunity\b|\bworkshop\b|\bseminar\b|\bspeaker series\b|\bbook club\b|\bshowcase\b|\bfilm festival\b/]
   ];
   const excludeRules = EXCLUDE_KEYWORDS.map((k) => [k, new RegExp(`\\b${k.replace(/\s+/g, '\\\\s+')}\\b`)]);
 
@@ -860,7 +887,7 @@ function isChicagoAreaEvent(event) {
 
 function cleanLocationString(loc) {
   if (!loc) return loc;
-  let parts = loc.split(',').map((p) => p.trim()).filter(Boolean);
+  let parts = decodeHtmlEntities(loc).split(',').map((p) => p.trim()).filter(Boolean);
   // Remove consecutive duplicate parts.
   parts = parts.filter((p, i) => i === 0 || p !== parts[i - 1]);
   // Strip embedded zip codes.
@@ -998,18 +1025,22 @@ function inferEventTaxonomy(title, description, extras = []) {
 function mapToRow(event, fallbackUrl, fallbackImage) {
   const mode = String(event.eventAttendanceMode || '').toLowerCase();
   const online = mode.includes('online') ? 'TRUE' : 'FALSE';
+  const title = decodeHtmlEntities(event.name || '') || null;
+  const description = decodeHtmlEntities(event.description || '');
+  const eventUrl = canonicalizeUrl(event.url || event['@id'] || fallbackUrl);
+  const location = normalizeLocation(event.location);
   const row = {
-    title: event.name || null,
+    title,
     start_datetime: event.startDate || null,
     Online: online,
-    ...inferEventTaxonomy(event.name, event.description, [
-      normalizeLocation(event.location),
-      event['@id'],
+    ...inferEventTaxonomy(title, description, [
+      location,
+      eventUrl,
       fallbackUrl
     ]),
     image_url: Array.isArray(event.image) ? event.image[0] : event.image || fallbackImage,
-    eventUrl: event['@id'] || fallbackUrl,
-    location: normalizeLocation(event.location),
+    eventUrl,
+    location,
     google_maps_url: null
   };
 
@@ -1063,6 +1094,12 @@ function extractEventUrlsFromListing(html) {
       // Not a valid URL, skip.
     }
   }
+
+  for (const event of extractJsonLdEvents(html)) {
+    const eventUrl = canonicalizeUrl(event.url || event['@id']);
+    if (eventUrl) urls.add(eventUrl);
+  }
+
   return [...urls];
 }
 
@@ -1260,6 +1297,19 @@ async function loadCandidateUrls(opts) {
   return [...allUrls].slice(0, opts.max);
 }
 
+function loadCuratedSeedPages() {
+  const filePath = path.resolve(__dirname, '..', 'discovery', CURATED_SEED_FILE);
+  if (!fs.existsSync(filePath)) return [];
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    if (!Array.isArray(parsed.seed_pages)) return [];
+    return parsed.seed_pages.map((value) => canonicalizeUrl(String(value || '').trim())).filter(Boolean);
+  } catch (err) {
+    console.log(`Curated seed load failed (${filePath}): ${err.message}`);
+    return [];
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Load current/future seed event URLs from DB. Routine discovery relies on
 // upcoming events instead of re-mining the full event history each run.
@@ -1426,8 +1476,8 @@ async function upsertEventRows(supabase, table, rows) {
   return stats;
 }
 
-async function main() {
-  const opts = parseArgs(process.argv.slice(2));
+async function runCli(argv = process.argv.slice(2)) {
+  const opts = parseArgs(argv);
   const scrapeStartedAt = new Date();
   resetHostRuntimePolicies(opts);
   const writeKey = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -1474,12 +1524,16 @@ async function main() {
       const seedPageCache = loadSeedPageCache();
       const cachedSeedPages = new Set(seedPageCache.seed_pages || []);
       const minedEventUrls = new Set(seedPageCache.mined_event_urls || []);
-      const seedPageUrls = new Set([...orgUrls, ...cachedSeedPages]);
+      const curatedSeedPages = loadCuratedSeedPages();
+      const seedPageUrls = new Set([...orgUrls, ...cachedSeedPages, ...curatedSeedPages]);
       const lumaSeedUrls = dbSeedEventUrls.filter((u) => isLumaUrl(u));
       const unminedLumaSeedUrls = lumaSeedUrls.filter((u) => !minedEventUrls.has(u));
       console.log(
         `Using ${cachedSeedPages.size} cached seed page(s). Mining ${unminedLumaSeedUrls.length} new Luma event page(s) for org links...`
       );
+      if (curatedSeedPages.length > 0) {
+        console.log(`Loaded ${curatedSeedPages.length} curated seed page(s).`);
+      }
       await parallelMap(
         unminedLumaSeedUrls,
         async (eventUrl) => {
@@ -1641,7 +1695,14 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error(err.message);
-  process.exit(1);
-});
+module.exports = {
+  parseArgs,
+  runCli
+};
+
+if (require.main === module) {
+  runCli().catch((err) => {
+    console.error(err.message);
+    process.exit(1);
+  });
+}
