@@ -85,30 +85,6 @@ function renderTaxonomyList(event) {
     .join('<br>');
 }
 
-function renderLogoStyles() {
-  return 'img.site-logo { display: block; width: min(100%, 540px); height: auto; margin: 0 0 12px; }';
-}
-
-function renderThemeStyles() {
-  return `
-    a { color: #1d6f93; }
-    a:visited { color: #1d6f93; }
-    h1 { font-size: 18px; background: #41b6e6; color: #fff; padding: 4px 8px; margin-bottom: 8px; }
-    button { padding: 8px 10px; background: #41b6e6; color: #fff; border: 1px solid #1d6f93; }
-    .tabs a { display: inline-block; padding: 4px 10px; margin-right: 4px; font-size: 12px; text-decoration: none; border: 1px solid #1d6f93; color: #fff; background: #41b6e6; }
-    .tabs a.active { background: #1d6f93; color: #fff; border-color: #1d6f93; }
-    .tabs a:visited { color: #fff; }
-    .tabs a.active:visited { color: #fff; }
-    .filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; align-items: end; background: #fff; border: 1px solid #bbb; padding: 10px; }
-    .filters label { display: block; font-size: 12px; font-weight: bold; margin-bottom: 4px; }
-    .filters select { width: 100%; box-sizing: border-box; padding: 6px; border: 1px solid #999; background: #fff; }
-    .filters .filter-actions { display: flex; gap: 8px; align-items: center; }
-    .filters .clear-link { font-size: 12px; }
-    .calendar-head a { text-decoration: none; border: 1px solid #1d6f93; background: #41b6e6; color: #fff; padding: 2px 8px; font-size: 12px; }
-    .day-today { outline: 2px solid #41b6e6; outline-offset: -2px; }
-  `;
-}
-
 function buildUrl(path, params = {}) {
   const query = new URLSearchParams();
   Object.entries(params).forEach(([k, v]) => {
@@ -135,7 +111,5 @@ module.exports = {
   buildTaxonomyOptions,
   buildFilterOptions,
   renderTaxonomyList,
-  renderLogoStyles,
-  renderThemeStyles,
   buildUrl
 };
