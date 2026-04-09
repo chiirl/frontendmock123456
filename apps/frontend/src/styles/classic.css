@@ -1,0 +1,85 @@
+/* Classic view — dark/light theme variables + page components */
+
+/* Theme variables */
+html.theme-light {
+  --cl-bg: #f0f0e8; --cl-text: #222; --cl-link: #1d6f93;
+  --cl-li-border: #ccc; --cl-date: #666; --cl-loc: #888; --cl-tag: #555;
+  --cl-panel-bg: #fff; --cl-panel-border: #bbb; --cl-opt-border: #eee;
+  --cl-table-bg: #fff; --cl-th-bg: #ddd; --cl-td-border: #bbb;
+  --cl-muted-text: #999; --cl-muted-bg: #fafafa;
+  --cl-email-bg: #fff; --cl-select-bg: #fff; --cl-select-border: #999;
+  --cl-results: #666; --cl-chip-bg: #fff; --cl-chip-border: #1d6f93; --cl-chip-text: #1d6f93;
+  --cl-count: #666; --cl-cal-time: #666;
+}
+html.theme-dark {
+  --cl-bg: #15151f; --cl-text: #d0d0e0; --cl-link: #41b6e6;
+  --cl-li-border: #333; --cl-date: #aaa; --cl-loc: #888; --cl-tag: #aaa;
+  --cl-panel-bg: #1e1e2e; --cl-panel-border: #444; --cl-opt-border: #333;
+  --cl-table-bg: #1e1e2e; --cl-th-bg: #252538; --cl-td-border: #444;
+  --cl-muted-text: #555; --cl-muted-bg: #181828;
+  --cl-email-bg: #1e1e2e; --cl-select-bg: #1e1e2e; --cl-select-border: #444;
+  --cl-results: #888; --cl-chip-bg: #1e1e2e; --cl-chip-border: #41b6e6; --cl-chip-text: #41b6e6;
+  --cl-count: #888; --cl-cal-time: #888;
+}
+
+/* Layout */
+body { font-family: arial, helvetica, sans-serif; font-size: 14px; background: var(--cl-bg); color: var(--cl-text); margin: 0; padding: 10px; }
+a { color: var(--cl-link); }
+a:visited { color: var(--cl-link); }
+ul { list-style: none; padding: 0; max-width: 800px; }
+li { padding: 4px 0; border-bottom: 1px solid var(--cl-li-border); display: flex; align-items: center; gap: 8px; }
+li img { width: 50px; height: 50px; object-fit: cover; border-radius: 4px; flex-shrink: 0; }
+.date { color: var(--cl-date); font-size: 12px; }
+.loc { color: var(--cl-loc); font-size: 12px; }
+.tag { font-size: 11px; color: var(--cl-tag); }
+.tabs { margin-bottom: 10px; max-width: 800px; }
+
+/* Filter toolbar */
+.filter-toolbar { display: flex; flex-wrap: wrap; gap: 0; max-width: 800px; margin-bottom: 6px; position: relative; overflow: visible; }
+.filter-btn, .clear-btn { appearance: none; border: 1px solid #1d6f93; background: #41b6e6; color: #fff; padding: 4px 10px; font: inherit; font-size: 12px; cursor: pointer; }
+.filter-btn.active { background: #1d6f93; color: #fff; }
+.filter-panel { display: none; position: absolute; left: 0; top: calc(100% + 6px); width: min(320px, calc(100vw - 20px)); max-width: calc(100vw - 20px); box-sizing: border-box; max-height: 60vh; overflow: auto; background: var(--cl-panel-bg); border: 1px solid var(--cl-panel-border); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12); padding: 10px; z-index: 20; color: var(--cl-text); }
+.filter-panel.open { display: block; }
+.filter-option { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--cl-opt-border); }
+.filter-option:last-child { border-bottom: 0; }
+.filter-option label { display: flex; gap: 8px; align-items: center; cursor: pointer; flex: 1; }
+.filter-count { color: var(--cl-count); font-size: 12px; white-space: nowrap; }
+
+/* Chips */
+.active-chips { display: flex; flex-wrap: wrap; gap: 6px; max-width: 800px; margin: 0 0 10px; }
+.chip { appearance: none; border: 1px solid var(--cl-chip-border); background: var(--cl-chip-bg); color: var(--cl-chip-text); padding: 4px 8px; font: inherit; font-size: 12px; cursor: pointer; }
+.results-count { max-width: 800px; margin: 0 0 8px; color: var(--cl-results); font-size: 12px; }
+
+/* Theme toggle */
+.theme-toggle-btn { appearance: none; border: 1px solid #1d6f93; background: #41b6e6; color: #fff; padding: 4px 10px; font: inherit; font-size: 12px; cursor: pointer; margin-right: 4px; }
+html.theme-dark .theme-toggle-btn { background: #1e1e2e; border-color: #41b6e6; color: #41b6e6; }
+
+/* Responsive */
+@media (max-width: 640px) {
+  .filter-toolbar { gap: 0; }
+  .filter-btn, .clear-btn { flex: 1 1 calc(50% - 6px); min-height: 34px; }
+  .filter-panel { left: 0; right: 0; width: auto; min-width: 0; max-width: calc(100vw - 20px); max-height: 70vh; }
+}
+
+/* Email draft */
+pre.email-draft { max-width: 900px; white-space: pre-wrap; background: var(--cl-email-bg); border: 1px solid var(--cl-panel-border); padding: 10px; font-family: "Courier New", monospace; line-height: 1.4; color: var(--cl-text); }
+.subtools { margin-bottom: 10px; max-width: 900px; font-size: 12px; }
+.copy-btn { font-size: 12px; padding: 2px 8px; }
+
+/* Calendar */
+.calendar-wrap { max-width: 1000px; }
+.calendar-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.calendar-head .month { font-weight: bold; min-width: 180px; }
+table.calendar { width: 100%; border-collapse: collapse; table-layout: fixed; background: var(--cl-table-bg); color: var(--cl-text); }
+table.calendar th, table.calendar td { border: 1px solid var(--cl-td-border); vertical-align: top; padding: 6px; }
+table.calendar th { background: var(--cl-th-bg); font-size: 12px; }
+table.calendar td { height: 120px; font-size: 12px; }
+.day-num { font-weight: bold; margin-bottom: 4px; }
+.day-muted { color: var(--cl-muted-text); background: var(--cl-muted-bg); }
+.cal-event { margin: 2px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cal-event a { text-decoration: underline; }
+.cal-time { color: var(--cl-cal-time); margin-right: 4px; }
+
+/* Dark mode overrides for legacy filter selects */
+html.theme-dark .filters { background: var(--cl-panel-bg); border-color: var(--cl-panel-border); color: var(--cl-text); }
+html.theme-dark .filters select { background: var(--cl-select-bg); border-color: var(--cl-select-border); color: var(--cl-text); }

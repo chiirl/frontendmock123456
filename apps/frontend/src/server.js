@@ -15,12 +15,11 @@ const {
 const {
   LOGO_STYLES,
   BASE_STYLES,
-  CLASSIC_THEME_VARS,
   CLASSIC_PAGE_STYLES,
   EVENT_DETAIL_STYLES,
   ARCHIVE_STYLES,
   RAW_TABLE_STYLES
-} = require('./styles/classic');
+} = require('./styles');
 const { deduplicateEvents, filterUpcoming } = require('./utils/events');
 const { renderModernEventsHtml } = require('./views/modern');
 const { buildEmailDraft, buildEmailDraftHtml } = require('./views/email');
@@ -94,7 +93,6 @@ app.get(['/', '/email', '/calendar/:month?'], async (req, res) => {
   <title>Chicago In Real Life | The Top Tech & Startup Events</title>
   <script>!function(){var s=localStorage.getItem('chiirl-theme'),d=window.matchMedia('(prefers-color-scheme:dark)').matches;document.documentElement.className='theme-'+(s||(d?'dark':'light'));}();</script>
   <style>
-    ${CLASSIC_THEME_VARS}
     ${LOGO_STYLES}
     ${BASE_STYLES}
     ${CLASSIC_PAGE_STYLES}

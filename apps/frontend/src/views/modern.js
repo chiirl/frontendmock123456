@@ -1,6 +1,6 @@
 const { parseEventDate, chicagoDateKey, CHICAGO_TIMEZONE, formatChiirlTimeShort } = require('../utils/dates');
 const { escapeHtml, encodeFilterValues } = require('../utils/format');
-const { MODERN_STYLES } = require('../styles/modern');
+const { MODERN_STYLES } = require('../styles');
 
 function renderModernEventsHtml(deduped, currentFilters, audienceOptions, industryOptions, topicOptions, activityOptions, toggleUrl) {
   const byDay = new Map();
