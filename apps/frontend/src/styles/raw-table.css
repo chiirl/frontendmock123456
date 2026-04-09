@@ -1,0 +1,8 @@
+/* Raw data table page */
+
+body { font-family: arial, helvetica, sans-serif; font-size: 12px; background: #f0f0e8; color: #222; margin: 0; padding: 10px; }
+.tabs { margin-bottom: 10px; max-width: 100%; }
+table { border-collapse: collapse; width: 100%; }
+th, td { border: 1px solid #999; padding: 3px 6px; text-align: left; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+th { background: #ddd; position: sticky; top: 0; }
+tr:nth-child(even) { background: #e8e8e0; }

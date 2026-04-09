@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CHIIRL | Raw Data</title>
+  <style>
+    <%- LOGO_STYLES %>
+    <%- BASE_STYLES %>
+    <%- RAW_TABLE_STYLES %>
+  </style>
+</head>
+<body>
+  <img class="site-logo" src="/logo.png" alt="CHIIRL | Chicago In Real Life">
+  <h1>CHIIRL | Raw Data</h1>
+  <p><a href="<%= buildUrl('/') %>">back</a></p>
+  <table>
+    <tr><% cols.forEach(function(c) { %><th><%= c %></th><% }); %></tr>
+    <% events.forEach(function(e) { %>
+      <tr><% cols.forEach(function(c) { %><td><%- e[c] != null ? e[c] : '' %></td><% }); %></tr>
+    <% }); %>
+  </table>
+</body>
+</html>

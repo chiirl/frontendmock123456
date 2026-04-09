@@ -1,0 +1,76 @@
+<%- include('partials/classic-head') %>
+
+  <div class="filter-toolbar" id="filter-toolbar">
+    <button class="filter-btn" type="button" data-filter-button="audience">Audience &#9660;</button>
+    <button class="filter-btn" type="button" data-filter-button="industry">Industry &#9660;</button>
+    <button class="filter-btn" type="button" data-filter-button="topic">Topic &#9660;</button>
+    <button class="filter-btn" type="button" data-filter-button="activity">Activity &#9660;</button>
+    <button class="filter-btn" type="button" data-filter-button="mode">Mode &#9660;</button>
+    <button class="clear-btn" type="button" id="clear-filters">Clear</button>
+    <div class="filter-panel" data-filter-panel="audience">
+      <% audienceOptions.forEach(function(value) { %>
+        <div class="filter-option" data-option="<%= value %>">
+          <label><input type="checkbox" data-filter-key="audience" value="<%= value %>"<%= audienceFilter.includes(value) ? ' checked' : '' %>> <span><%= value %></span></label>
+          <span class="filter-count"></span>
+        </div>
+      <% }); %>
+    </div>
+    <div class="filter-panel" data-filter-panel="industry">
+      <% industryOptions.forEach(function(value) { %>
+        <div class="filter-option" data-option="<%= value %>">
+          <label><input type="checkbox" data-filter-key="industry" value="<%= value %>"<%= industryFilter.includes(value) ? ' checked' : '' %>> <span><%= value %></span></label>
+          <span class="filter-count"></span>
+        </div>
+      <% }); %>
+    </div>
+    <div class="filter-panel" data-filter-panel="topic">
+      <% topicOptions.forEach(function(value) { %>
+        <div class="filter-option" data-option="<%= value %>">
+          <label><input type="checkbox" data-filter-key="topic" value="<%= value %>"<%= topicFilter.includes(value) ? ' checked' : '' %>> <span><%= value %></span></label>
+          <span class="filter-count"></span>
+        </div>
+      <% }); %>
+    </div>
+    <div class="filter-panel" data-filter-panel="activity">
+      <% activityOptions.forEach(function(value) { %>
+        <div class="filter-option" data-option="<%= value %>">
+          <label><input type="checkbox" data-filter-key="activity" value="<%= value %>"<%= activityFilter.includes(value) ? ' checked' : '' %>> <span><%= value %></span></label>
+          <span class="filter-count"></span>
+        </div>
+      <% }); %>
+    </div>
+    <div class="filter-panel" data-filter-panel="mode">
+      <% ['irl', 'online'].forEach(function(value) { %>
+        <div class="filter-option" data-option="<%= value %>">
+          <label><input type="checkbox" data-filter-key="mode" value="<%= value %>"<%= modeFilter.includes(value) ? ' checked' : '' %>> <span><%= value === 'irl' ? 'IRL' : 'Online' %></span></label>
+          <span class="filter-count"></span>
+        </div>
+      <% }); %>
+    </div>
+  </div>
+  <div class="active-chips" id="active-chips"></div>
+  <p class="results-count" id="results-count"></p>
+  <ul id="event-list">
+    <% deduped.forEach(function(e) { %>
+      <li
+        data-audience="<%= encodeFilterValues(e.audience) %>"
+        data-industry="<%= encodeFilterValues(e.industry) %>"
+        data-topic="<%= encodeFilterValues(e.topic) %>"
+        data-activity="<%= encodeFilterValues(e.activity) %>"
+        data-mode="<%= e.Online === 'TRUE' ? 'online' : 'irl' %>"
+      >
+        <% if (e.image_url) { %><img src="<%= e.image_url %>" alt=""><% } %>
+        <div><a href="<%= e.eventUrl || '#' %>"><%= e.title %></a>
+        <span class="tag">(<%= e.Online === 'TRUE' ? 'Online' : 'IRL' %>)</span><br>
+        <span class="date"><%= formatChicagoDateTime(e.start_datetime) %></span>
+        <span class="loc"><%= e.location || '' %></span>
+        <% if (e.google_maps_url && e.Online !== 'TRUE') { %> - <a href="<%= e.google_maps_url %>">map</a><% } %>
+        - <a href="<%= buildUrl('/event', { title: e.title, date: e.start_datetime || '' }) %>">raw</a>
+        <% var taxList = renderTaxonomyList(e); if (taxList) { %><br><%- taxList %><% } %>
+        </div>
+      </li>
+    <% }); %>
+  </ul>
+  <script src="/js/classic-filters.js"></script>
+
+<%- include('partials/classic-foot') %>
