@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CHIIRL | Archive</title>
+  <style>
+    <%- LOGO_STYLES %>
+    <%- BASE_STYLES %>
+    <%- ARCHIVE_STYLES %>
+  </style>
+</head>
+<body>
+  <img class="site-logo" src="/logo.png" alt="CHIIRL | Chicago In Real Life">
+  <h1>CHIIRL | Archive</h1>
+  <p><a href="<%= buildUrl('/') %>">back to upcoming</a></p>
+  <ul>
+    <% events.forEach(function(e) { %>
+      <li>
+        <% if (e.image_url) { %><img src="<%= e.image_url %>" alt=""><% } %>
+        <div><a href="<%= e.eventUrl || '#' %>"><%= e.title %></a>
+        <span class="tag">(<%= e.Online === 'TRUE' ? 'Online' : 'IRL' %>)</span><br>
+        <span class="date"><%= formatChicagoDateTime(e.start_datetime, true) %></span>
+        <span class="loc"><%= e.location || '' %></span>
+        - <a href="<%= buildUrl('/event', { title: e.title, date: e.start_datetime || '' }) %>">raw</a>
+        </div>
+      </li>
+    <% }); %>
+  </ul>
+</body>
+</html>

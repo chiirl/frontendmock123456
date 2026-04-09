@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Chicago In Real Life | The Top Tech &amp; Startup Events</title>
+  <script>!function(){var s=localStorage.getItem('chiirl-theme'),d=window.matchMedia('(prefers-color-scheme:dark)').matches;document.documentElement.className='theme-'+(s||(d?'dark':'light'));}();</script>
+  <style>
+    <%- LOGO_STYLES %>
+    <%- BASE_STYLES %>
+    <%- CLASSIC_PAGE_STYLES %>
+  </style>
+</head>
+<body>
+  <img class="site-logo" src="/logo.png" alt="CHIIRL | Chicago In Real Life">
+  <h1>Chicago In Real Life | The Top Tech &amp; Startup Events</h1>
+  <div class="tabs" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+    <a href="<%= buildUrl('/', currentFilters) %>"<%= view === 'events' ? ' class="active"' : '' %>>Events</a>
+    <a href="/email"<%= view === 'email' ? ' class="active"' : '' %>>Email Draft</a>
+    <a href="/calendar<%= calendar.monthParam ? '/' + calendar.monthParam : '' %>"<%= view === 'calendar' ? ' class="active"' : '' %>>Calendar</a>
+    <button id="theme-toggle" class="theme-toggle-btn" type="button" title="Toggle color theme">&#9728;</button>
+    <% if (view === 'events') { %>
+      <a href="<%= buildUrl('/', Object.assign({}, currentFilters, { view: 'modern' })) %>" style="margin-left:auto;">&#10022; Modern View</a>
+    <% } %>
+  </div>
+  <p><a href="<%= buildUrl('/archive') %>">archive</a> | <a href="<%= buildUrl('/raw') %>">raw table</a></p>

@@ -1,0 +1,35 @@
+<%- include('partials/classic-head') %>
+
+  <div class="calendar-wrap">
+    <div class="calendar-head">
+      <a href="/calendar/<%= calendar.prevMonthParam %>">&larr; Prev</a>
+      <span class="month"><%= calendar.monthLabel %></span>
+      <a href="/calendar/<%= calendar.nextMonthParam %>">Next &rarr;</a>
+    </div>
+    <table class="calendar">
+      <thead>
+        <tr>
+          <th>Sun</th><th>Mon</th><th>Tue</th><th>Wed</th><th>Thu</th><th>Fri</th><th>Sat</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% calendar.weeks.forEach(function(week) { %>
+          <tr>
+            <% week.forEach(function(cell) { %>
+              <td class="<%= cell.inMonth ? '' : 'day-muted' %> <%= cell.isToday ? 'day-today' : '' %>">
+                <div class="day-num"><%= cell.day %></div>
+                <% cell.events.forEach(function(e) { %>
+                  <div class="cal-event">
+                    <span class="cal-time"><%= formatChiirlTimeShort(e.start_datetime) %></span>
+                    <a href="<%= e.eventUrl || '#' %>" target="_blank" rel="noopener noreferrer"><%= e.title || '' %></a>
+                  </div>
+                <% }); %>
+              </td>
+            <% }); %>
+          </tr>
+        <% }); %>
+      </tbody>
+    </table>
+  </div>
+
+<%- include('partials/classic-foot') %>

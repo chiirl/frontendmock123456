@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Chicago In Real Life | The Top Tech &amp; Startup Events</title>
+  <script>!function(){var s=localStorage.getItem('chiirl-theme'),d=window.matchMedia('(prefers-color-scheme:dark)').matches;document.documentElement.className='theme-'+(s||(d?'dark':'light'));}();</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style><%- MODERN_STYLES %></style>
+</head>
+<body>
+  <header class="site-header">
+    <div class="wordmark">CHI<svg xmlns="http://www.w3.org/2000/svg" viewBox="98 180 104 120" height="0.85em" style="display:inline;vertical-align:middle;position:relative;top:-2px;"><path d="M150,180l11,41l41,-11l-30,30l30,30l-41,-11l-11,41l-11,-41l-41,11l30,-30l-30,-30l41,11z" fill="#E4002B"/></svg><span>IRL</span></div>
+    <div class="header-right">
+      <button class="theme-toggle" id="theme-toggle" type="button" title="Toggle color theme">&#9728;</button>
+      <a href="<%= toggleUrl %>" class="view-toggle">Classic View</a>
+    </div>
+  </header>
+
+  <div class="hero-strip">
+    <h1>Chicago Tech &amp;<br><em>Startup Events</em></h1>
+    <p>The best IRL and online events happening in Chicago.</p>
+    <div class="results-count-modern" id="results-count-modern"></div>
+  </div>
+
+  <div class="filter-bar" id="filter-bar-modern">
+    <% filterGroups.forEach(function(group) { %>
+    <div class="filter-dropdown-wrap">
+      <button class="filter-group-btn" type="button" data-modern-filter-btn="<%= group.key %>"><%= group.label %> &#9662;</button>
+      <div class="filter-dropdown" data-modern-filter-panel="<%= group.key %>">
+        <% group.options.forEach(function(value) { %>
+          <% var display = value === 'irl' ? 'IRL' : value === 'online' ? 'Online' : value; %>
+          <% var active = currentFilters[group.key] && currentFilters[group.key].split(',').map(function(s) { return s.trim(); }).includes(value); %>
+          <label class="filter-dropdown-item">
+            <input type="checkbox" data-modern-filter-key="<%= group.key %>" value="<%= value %>"<%= active ? ' checked' : '' %>>
+            <span><%= display %></span>
+            <span class="opt-count"></span>
+          </label>
+        <% }); %>
+      </div>
+    </div>
+    <% }); %>
+    <button class="clear-modern-btn" type="button" id="clear-modern-filters">Clear all</button>
+  </div>
+
+  <div class="active-chips-modern" id="active-chips-modern"></div>
+
+  <div class="events-container" id="events-container">
+    <% if (days.length === 0) { %>
+      <div class="empty-state">No upcoming events found.</div>
+    <% } else { %>
+      <% days.forEach(function(day) { %>
+      <section class="day-section">
+        <h2 class="day-heading"><%= day.label %></h2>
+        <div class="card-grid">
+          <% day.events.forEach(function(e) { %>
+            <% var mode = e.Online === 'TRUE' ? 'online' : 'irl'; %>
+            <% var loc = e.location ? e.location.split(',')[0].trim() : ''; %>
+            <a class="card" href="<%= e.eventUrl || '#' %>" target="_blank" rel="noopener noreferrer"
+              data-audience="<%= encodeFilterValues(e.audience) %>"
+              data-industry="<%= encodeFilterValues(e.industry) %>"
+              data-topic="<%= encodeFilterValues(e.topic) %>"
+              data-activity="<%= encodeFilterValues(e.activity) %>"
+              data-mode="<%= mode %>"
+            >
+              <div class="card-img-wrap">
+                <% if (e.image_url) { %>
+                  <img src="<%= e.image_url %>" alt="" loading="lazy">
+                <% } else { %>
+                  <div class="card-img-placeholder"></div>
+                <% } %>
+                <div class="card-date-badge"><%= day.badge %></div>
+                <span class="pill <%= mode === 'online' ? 'pill-online' : 'pill-irl' %>"><%= mode === 'online' ? 'Online' : 'IRL' %></span>
+              </div>
+              <div class="card-body">
+                <% var time = formatChiirlTimeShort(e.start_datetime); %>
+                <% if (time) { %><div class="card-time"><%= time %></div><% } %>
+                <h3 class="card-title"><%= e.title || '' %></h3>
+                <% if (loc) { %><p class="card-loc"><%= loc %></p><% } %>
+              </div>
+            </a>
+          <% }); %>
+        </div>
+      </section>
+      <% }); %>
+    <% } %>
+  </div>
+
+  <script src="/js/modern-filters.js"></script>
+  <script src="/js/theme-toggle.js"></script>
+</body>
+</html>
